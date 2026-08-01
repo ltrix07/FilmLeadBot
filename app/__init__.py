@@ -1,0 +1,2 @@
+"""FilmTraficBot application package."""
+
