@@ -6,6 +6,8 @@ from app.db.models.campaign_limit_history import CampaignLimitHistory
 from app.db.models.movie_code import MovieCode, MovieCodeStatus
 from app.db.models.movie_code_audit import MovieCodeAudit, MovieCodeAuditAction, MovieCodeAuditSource
 from app.db.models.partner_balance_adjustment import PartnerBalanceAdjustment
+from app.db.models.pending_admin_grant import PendingAdminGrant
+from app.db.models.pending_partner_grant import PendingPartnerGrant
 from app.db.models.pricing_settings import PricingSettings
 from app.db.models.referral_event import ReferralEvent
 from app.db.models.referral_partner import ReferralPartner
@@ -29,6 +31,8 @@ __all__ = [
     "MovieCodeAuditSource",
     "MovieCodeStatus",
     "PartnerBalanceAdjustment",
+    "PendingAdminGrant",
+    "PendingPartnerGrant",
     "PricingSettings",
     "ReferralEvent",
     "ReferralPartner",

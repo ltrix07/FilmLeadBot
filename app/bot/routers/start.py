@@ -10,17 +10,60 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.bot.gate import render_gate_text, render_menu_text
 from app.bot.keyboards import build_gate_keyboard
 from app.config import Settings
-from app.db.models import ReferralEvent, ReferralPartner, Sponsor, User
+from app.db.models import (
+    PendingAdminGrant,
+    PendingPartnerGrant,
+    ReferralEvent,
+    ReferralPartner,
+    Sponsor,
+    User,
+)
 from app.services.notifications import (
     format_campaign_completed,
     format_campaign_error,
+    notify_admin,
     notify_admins,
 )
-from app.services.partners import get_partner_menu_keyboard
+from app.services.admins import add_admin
+from app.services.partners import approve_partner, get_partner_menu_keyboard
 from app.services.subscription import SubscriptionAccessService
 from app.services.settings import get_welcome_message
 
 start_router = Router(name="start")
+
+
+async def _apply_pending_grants(session: AsyncSession, telegram_id: int, bot: Bot) -> None:
+    """Apply grants queued before this user first started the bot."""
+    partner_grant = await session.get(PendingPartnerGrant, telegram_id)
+    if partner_grant is not None:
+        requester = partner_grant.requested_by_admin_telegram_id
+        await approve_partner(session, telegram_id, requester)
+        await session.delete(partner_grant)
+        await session.commit()
+        await notify_admin(
+            bot,
+            requester,
+            f"Рефовод #{telegram_id} запустил бота — права выданы автоматически.",
+        )
+
+    admin_grant = await session.get(PendingAdminGrant, telegram_id)
+    if admin_grant is not None:
+        requester = admin_grant.requested_by_admin_telegram_id
+        await add_admin(
+            session,
+            telegram_id,
+            can_manage_admins=admin_grant.can_manage_admins,
+            can_manage_payouts=admin_grant.can_manage_payouts,
+        )
+        await session.delete(admin_grant)
+        await session.commit()
+        await notify_admin(
+            bot,
+            requester,
+            f"Администратор #{telegram_id}: права выданы автоматически "
+            f"(админы: {'да' if admin_grant.can_manage_admins else 'нет'}, "
+            f"выплаты: {'да' if admin_grant.can_manage_payouts else 'нет'}).",
+        )
 
 
 async def _send_welcome_message(message: Message, bot: Bot, session_factory, settings: Settings) -> None:
@@ -45,6 +88,7 @@ async def _ensure_user_and_referral(
     payload: str | None,
     username: str | None = None,
     full_name: str | None = None,
+    bot: Bot | None = None,
 ) -> None:
     user = await session.get(User, telegram_id)
     if user is not None:
@@ -82,6 +126,8 @@ async def _ensure_user_and_referral(
             )
         )
     await session.commit()
+    if bot is not None:
+        await _apply_pending_grants(session, telegram_id, bot)
 
 
 @start_router.message(CommandStart())
@@ -100,6 +146,7 @@ async def cmd_start(
             command.args,
             message.from_user.username,
             message.from_user.full_name,
+            bot,
         )
         result = await subscription_service.evaluate_user_access(session, bot, message.from_user.id)
     if result.newly_completed_campaigns or result.errored_campaigns:

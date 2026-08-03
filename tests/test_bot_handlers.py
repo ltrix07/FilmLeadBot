@@ -65,6 +65,7 @@ from app.db.models import (
     ReferralEvent,
     ReferralPartner,
     PartnerBalanceAdjustment,
+    PendingAdminGrant,
     Sponsor,
     SponsorType,
     User,
@@ -754,6 +755,42 @@ async def test_admin_grant_flow_creates_permissions_clears_state_and_restores_me
     assert (admin.can_manage_admins, admin.can_manage_payouts) == (True, False)
     assert await state.get_state() is None
     assert any(call.args == ("Админ-панель:",) for call in message.answer.await_args_list)
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_admin_grant_flow_queues_user_who_never_started(session_factory):
+    async with session_factory() as session:
+        session.add(Admin(telegram_id=900, role="owner"))
+        await session.commit()
+    storage = MemoryStorage()
+    state = FSMContext(storage, StorageKey(bot_id=1, chat_id=1, user_id=900))
+    message = SimpleNamespace(answer=AsyncMock(), edit_text=AsyncMock())
+    callback = _partner_callback("admin:admins:add", message)
+
+    await add_admin_start(callback, state, session_factory)
+    await receive_admin_user(SimpleNamespace(text="100", answer=AsyncMock()), state)
+    await choose_admin_manage_permission(
+        _partner_callback("admin:admins:grant:manage_admins:no", message), state, session_factory
+    )
+    await choose_admin_payout_permission(
+        _partner_callback("admin:admins:grant:payouts:yes", message), state, session_factory
+    )
+
+    async with session_factory() as session:
+        grant = await session.get(PendingAdminGrant, 100)
+    assert (
+        grant.requested_by_admin_telegram_id,
+        grant.can_manage_admins,
+        grant.can_manage_payouts,
+    ) == (900, False, True)
+    assert await state.get_state() is None
+    assert any("Заявка сохранена" in call.args[0] for call in message.answer.await_args_list)
+    assert any(
+        call.args == ("Админ-панель:",)
+        and call.kwargs["reply_markup"] == _admin_menu_keyboard()
+        for call in message.answer.await_args_list
+    )
     await storage.close()
 
 

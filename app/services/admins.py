@@ -2,11 +2,42 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Admin, SponsorType, User
+from app.db.models import Admin, PendingAdminGrant, SponsorType, User
+
+
+async def queue_pending_admin_grant(
+    session: AsyncSession,
+    telegram_id: int,
+    requested_by_admin_telegram_id: int,
+    *,
+    can_manage_admins: bool,
+    can_manage_payouts: bool,
+) -> PendingAdminGrant:
+    """Create or refresh an administrator grant for a user who has not started yet."""
+    statement = insert(PendingAdminGrant).values(
+        telegram_id=telegram_id,
+        requested_by_admin_telegram_id=requested_by_admin_telegram_id,
+        can_manage_admins=can_manage_admins,
+        can_manage_payouts=can_manage_payouts,
+    )
+    statement = statement.on_conflict_do_update(
+        index_elements=[PendingAdminGrant.telegram_id],
+        set_={
+            "requested_by_admin_telegram_id": statement.excluded.requested_by_admin_telegram_id,
+            "can_manage_admins": statement.excluded.can_manage_admins,
+            "can_manage_payouts": statement.excluded.can_manage_payouts,
+            "created_at": func.now(),
+        },
+    )
+    await session.execute(statement)
+    await session.commit()
+    grant = await session.get(PendingAdminGrant, telegram_id)
+    assert grant is not None
+    return grant
 
 
 async def ensure_seed_admins(session: AsyncSession, telegram_ids: list[int]) -> None:

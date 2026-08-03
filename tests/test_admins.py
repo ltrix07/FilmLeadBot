@@ -7,12 +7,13 @@ from types import SimpleNamespace
 from app.bot.routers.admin import (
     PartnerForm,
     SponsorForm,
+    _admin_menu_keyboard,
     _process_partner_user,
     _process_sponsor_chat,
     receive_partner_user,
     receive_sponsor_chat,
 )
-from app.db.models import Admin, SponsorType, User
+from app.db.models import Admin, PendingPartnerGrant, SponsorType, User
 from app.services.admins import (
     add_admin,
     bot_status_allows_access,
@@ -39,6 +40,9 @@ class _State:
     async def clear(self) -> None:
         self.data.clear()
         self.current_state = None
+
+    async def get_state(self):
+        return self.current_state
 
 
 class _Message:
@@ -234,6 +238,28 @@ async def test_process_partner_user_approves_selected_user(session_factory):
 
     assert state.current_state is None
     assert any("Рефовод #100 добавлен" in text for text, _ in message.answers)
+
+
+@pytest.mark.asyncio
+async def test_process_partner_user_queues_grant_for_user_who_never_started(session_factory):
+    async with session_factory() as session:
+        session.add(Admin(telegram_id=800, role="owner"))
+        await session.commit()
+
+    state = _State()
+    await state.set_state(PartnerForm.waiting_user)
+    message = _Message(user_id=800)
+    await _process_partner_user(100, message, state, session_factory)
+
+    async with session_factory() as session:
+        grant = await session.get(PendingPartnerGrant, 100)
+    assert grant.requested_by_admin_telegram_id == 800
+    assert await state.get_state() is None
+    assert any("Заявка сохранена" in text for text, _ in message.answers)
+    assert any(
+        text == "Админ-панель:" and kwargs["reply_markup"] == _admin_menu_keyboard()
+        for text, kwargs in message.answers
+    )
 
 
 @pytest.mark.asyncio

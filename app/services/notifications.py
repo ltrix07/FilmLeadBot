@@ -10,6 +10,14 @@ from app.db.models import Admin, Campaign, Sponsor
 logger = logging.getLogger(__name__)
 
 
+async def notify_admin(bot: Bot, telegram_id: int, text: str) -> None:
+    """Deliver a notification to one administrator without failing the caller."""
+    try:
+        await bot.send_message(telegram_id, text)
+    except Exception as error:  # Telegram errors are individual delivery failures.
+        logger.warning("Could not notify admin %s: %s", telegram_id, error)
+
+
 async def notify_admins(bot: Bot, session_factory, text: str) -> None:
     """Deliver a notification to every administrator without aborting on one failure."""
     async with session_factory() as session:

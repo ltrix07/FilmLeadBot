@@ -51,6 +51,7 @@ from app.services.admins import (
     get_admin,
     get_admin_id,
     list_admins,
+    queue_pending_admin_grant,
     revoke_admin,
 )
 from app.services.broadcasts import (
@@ -81,6 +82,7 @@ from app.services.partners import (
     format_partner_stats_text,
     get_partner_stats,
     list_partners,
+    queue_pending_partner_grant,
     revoke_partner,
 )
 from app.services.settings import get_welcome_message, set_welcome_message
@@ -1467,9 +1469,25 @@ async def choose_admin_payout_permission(callback: CallbackQuery, state: FSMCont
             )
             viewer = await get_admin(session, callback.from_user.id)
     except LookupError as error:
+        if str(error) == "user_not_started":
+            async with session_factory() as session:
+                await queue_pending_admin_grant(
+                    session,
+                    int(telegram_id),
+                    callback.from_user.id,
+                    can_manage_admins=bool(data.get("admin_grant_can_manage_admins")),
+                    can_manage_payouts=payouts,
+                )
+            await state.clear()
+            await callback.message.answer(
+                "Этот пользователь ещё не запускал бота. Заявка сохранена — как только он "
+                "нажмёт /start, права администратора будут выданы автоматически."
+            )
+            await callback.answer()
+            await _send_admin_menu(callback.message)
+            return
         await state.clear()
-        message = "Этот пользователь ещё не запускал бота." if str(error) == "user_not_started" else "Этот пользователь — owner, его права менять нельзя."
-        await callback.message.answer(message)
+        await callback.message.answer("Этот пользователь — owner, его права менять нельзя.")
         await callback.answer("Не удалось выдать права.", show_alert=True)
         return
     await state.clear()
@@ -1594,7 +1612,14 @@ async def _process_partner_user(telegram_id: int, message: Message, state: FSMCo
             partner, is_new = await approve_partner(session, telegram_id, message.from_user.id)
     except LookupError as error:
         if str(error) == "user_not_started":
-            await message.answer("Этот пользователь ещё не запускал бота. Попроси его нажать /start, затем повтори.")
+            async with session_factory() as session:
+                await queue_pending_partner_grant(session, telegram_id, message.from_user.id)
+            await state.clear()
+            await message.answer(
+                "Этот пользователь ещё не запускал бота. Заявка сохранена — как только он "
+                "нажмёт /start, права рефовода будут выданы автоматически."
+            )
+            await _send_admin_menu(message)
             return
         raise
 

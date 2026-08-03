@@ -3,10 +3,36 @@ import secrets
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Campaign, ReferralEvent, ReferralPartner, ReferralSubscription, Sponsor, User
+from app.db.models import (
+    Campaign, PendingPartnerGrant, ReferralEvent, ReferralPartner,
+    ReferralSubscription, Sponsor, User,
+)
 from app.services.admins import get_admin_id
+
+
+async def queue_pending_partner_grant(
+    session: AsyncSession, telegram_id: int, requested_by_admin_telegram_id: int
+) -> PendingPartnerGrant:
+    """Create or refresh a partner grant to apply when the user starts the bot."""
+    statement = insert(PendingPartnerGrant).values(
+        telegram_id=telegram_id,
+        requested_by_admin_telegram_id=requested_by_admin_telegram_id,
+    )
+    statement = statement.on_conflict_do_update(
+        index_elements=[PendingPartnerGrant.telegram_id],
+        set_={
+            "requested_by_admin_telegram_id": statement.excluded.requested_by_admin_telegram_id,
+            "created_at": func.now(),
+        },
+    )
+    await session.execute(statement)
+    await session.commit()
+    grant = await session.get(PendingPartnerGrant, telegram_id)
+    assert grant is not None
+    return grant
 
 
 def get_partner_menu_extra_lines() -> list[str]:
