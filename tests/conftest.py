@@ -9,7 +9,8 @@ import app.db.models  # noqa: F401 - register all mapped tables with Base metada
 
 
 TEST_DATABASE_URL = os.getenv(
-    "TEST_DATABASE_URL", "postgresql+asyncpg://filmtraffic:filmtraffic@localhost:5432/filmtraffic"
+    "TEST_DATABASE_URL",
+    "postgresql+asyncpg://filmtraffic:filmtraffic@localhost:5433/filmtraffic_test",
 )
 
 

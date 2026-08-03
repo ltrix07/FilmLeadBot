@@ -22,5 +22,25 @@ services:
       postgres:
         condition: service_healthy
 
+  # Isolated database for `uv run pytest` — never shares data with `postgres` above.
+  # Tests run destructive TRUNCATEs between cases, so this must stay a separate instance.
+  postgres_test:
+    image: postgres:16
+    profiles: ["test"]
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_DB: filmtraffic_test
+      POSTGRES_USER: filmtraffic
+      POSTGRES_PASSWORD: filmtraffic
+    volumes:
+      - postgres_test_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U filmtraffic -d filmtraffic_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
 volumes:
   postgres_data:
+  postgres_test_data:
