@@ -18,6 +18,7 @@ from app.bot.routers.admin import (
     CodeSearchForm,
     CampaignForm,
     PartnerBalanceForm,
+    PricingForm,
     SponsorForm,
     _admin_menu_keyboard,
     _welcome_menu_keyboard,
@@ -51,6 +52,8 @@ from app.bot.routers.admin import (
     receive_admin_user,
     receive_partner_balance_amount,
     receive_partner_balance_title,
+    receive_subscription_price,
+    request_subscription_price,
     request_partner_balance_add,
     request_partner_balance_zero,
     request_partner_revoke,
@@ -84,7 +87,7 @@ from app.db.models import (
 from app.services.partner_balance import add_partner_balance_adjustment, get_partner_balance
 from app.services.admins import is_admin
 from app.services.partners import format_partner_stats_text
-from app.services.settings import set_welcome_message
+from app.services.settings import get_subscription_price, set_welcome_message
 from app.services.subscription import AccessResult
 
 
@@ -656,10 +659,10 @@ async def test_partners_page_paginates_partner_buttons_and_navigation(session_fa
             ))
         await session.commit()
 
-    first, first_users, total_pages = await _get_partners_page(session_factory, 0)
-    second, second_users, _ = await _get_partners_page(session_factory, 1)
-    first_keyboard = _partners_page_keyboard(first, first_users, 0, total_pages)
-    second_keyboard = _partners_page_keyboard(second, second_users, 1, total_pages)
+    first, first_users, total_pages, price = await _get_partners_page(session_factory, 0)
+    second, second_users, _, _ = await _get_partners_page(session_factory, 1)
+    first_keyboard = _partners_page_keyboard(first, first_users, 0, total_pages, price)
+    second_keyboard = _partners_page_keyboard(second, second_users, 1, total_pages, price)
 
     assert len(first) == 10
     assert len(second) == 5
@@ -670,7 +673,65 @@ async def test_partners_page_paginates_partner_buttons_and_navigation(session_fa
 
     callback = _partner_callback("admin:partners")
     await _edit_partners_page(callback, session_factory, 0)
-    assert callback.message.edit_text.await_args.args[0] == "Рефоводы (стр. 1/2):"
+    assert callback.message.edit_text.await_args.args[0] == "Рефоводы (стр. 1/2) · цена подписки: 0.00 ₽:"
+    assert first_keyboard.inline_keyboard[0][0].text == "💵 Цена подписки: 0.00 ₽ (изменить)"
+
+
+@pytest.mark.asyncio
+async def test_subscription_price_flow_saves_comma_value_and_returns_partners_list(session_factory):
+    storage = MemoryStorage()
+    state = FSMContext(storage, StorageKey(bot_id=1, chat_id=1, user_id=900))
+    callback = _partner_callback("admin:partners:price")
+
+    await request_subscription_price(callback, state)
+    assert await state.get_state() == PricingForm.waiting_price.state
+
+    message = SimpleNamespace(text="0,5", answer=AsyncMock())
+    await receive_subscription_price(message, state, session_factory)
+
+    async with session_factory() as session:
+        assert await get_subscription_price(session) == Decimal("0.50")
+    assert await state.get_state() is None
+    assert message.answer.await_args_list[0].args == ("Цена подписки обновлена: 0.50 ₽.",)
+    partners_menu = message.answer.await_args_list[1]
+    assert "Цена подписки: 0.50 ₽" in partners_menu.args[0]
+    assert partners_menu.kwargs["reply_markup"].inline_keyboard[0][0].text == (
+        "💵 Цена подписки: 0.50 ₽ (изменить)"
+    )
+    assert not any(call.args == ("Админ-панель:",) for call in message.answer.await_args_list)
+    await storage.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["не число", "-1", "NaN", "Infinity"])
+async def test_subscription_price_flow_rejects_invalid_values(session_factory, value):
+    storage = MemoryStorage()
+    state = FSMContext(storage, StorageKey(bot_id=1, chat_id=1, user_id=900))
+    await state.set_state(PricingForm.waiting_price)
+    message = SimpleNamespace(text=value, answer=AsyncMock())
+
+    await receive_subscription_price(message, state, session_factory)
+
+    assert await state.get_state() == PricingForm.waiting_price.state
+    assert "неотрицательную конечную цену" in message.answer.await_args.args[0]
+    async with session_factory() as session:
+        assert await get_subscription_price(session) == Decimal("0")
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_subscription_price_flow_cancel_does_not_change_price(session_factory):
+    storage = MemoryStorage()
+    state = FSMContext(storage, StorageKey(bot_id=1, chat_id=1, user_id=900))
+    await state.set_state(PricingForm.waiting_price)
+    message = SimpleNamespace(text="❌ Отмена", answer=AsyncMock())
+
+    await receive_subscription_price(message, state, session_factory)
+
+    assert await state.get_state() is None
+    async with session_factory() as session:
+        assert await get_subscription_price(session) == Decimal("0")
+    await storage.close()
 
 
 @pytest.mark.asyncio

@@ -85,7 +85,12 @@ from app.services.partners import (
     queue_pending_partner_grant,
     revoke_partner,
 )
-from app.services.settings import get_welcome_message, set_welcome_message
+from app.services.settings import (
+    get_subscription_price,
+    get_welcome_message,
+    set_subscription_price,
+    set_welcome_message,
+)
 from app.services.stats import get_overview_stats, get_top_codes, get_top_partners
 from app.services.bulk_import import (
     ImportPlan,
@@ -150,6 +155,10 @@ class ImportForm(StatesGroup):
 
 class PartnerForm(StatesGroup):
     waiting_user = State()
+
+
+class PricingForm(StatesGroup):
+    waiting_price = State()
 
 
 class AdminGrantForm(StatesGroup):
@@ -1497,17 +1506,21 @@ def _partner_status(partner: ReferralPartner) -> tuple[str, str]:
     return "⏳", "не активирован"
 
 
-def _partners_menu_text(page: int, total_pages: int) -> str:
+def _partners_menu_text(page: int, total_pages: int, price: Decimal) -> str:
     if total_pages == 0:
-        return "Рефоводов пока нет."
-    return f"Рефоводы (стр. {page + 1}/{max(total_pages, 1)}):"
+        return f"Рефоводов пока нет.\nЦена подписки: {price:.2f} ₽."
+    return (
+        f"Рефоводы (стр. {page + 1}/{max(total_pages, 1)}) · "
+        f"цена подписки: {price:.2f} ₽:"
+    )
 
 
 async def _get_partners_page(
     session_factory, page: int
-) -> tuple[list[ReferralPartner], dict[int, User], int]:
+) -> tuple[list[ReferralPartner], dict[int, User], int, Decimal]:
     async with session_factory() as session:
         total = await count_partners(session)
+        price = await get_subscription_price(session)
         total_pages = ceil(total / _PARTNERS_PER_PAGE)
         page = max(0, min(page, total_pages - 1)) if total_pages else 0
         partners = await list_partners(
@@ -1517,13 +1530,20 @@ async def _get_partners_page(
         users = [] if not ids else list(await session.scalars(
             select(User).where(User.telegram_id.in_(ids))
         ))
-    return partners, {user.telegram_id: user for user in users}, total_pages
+    return partners, {user.telegram_id: user for user in users}, total_pages, price
 
 
 def _partners_page_keyboard(
-    partners: list[ReferralPartner], users_by_id: dict[int, User], page: int, total_pages: int
+    partners: list[ReferralPartner], users_by_id: dict[int, User], page: int,
+    total_pages: int, price: Decimal,
 ) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(text="➕ Добавить рефовода", callback_data="admin:partner:add")]]
+    rows = [
+        [InlineKeyboardButton(
+            text=f"💵 Цена подписки: {price:.2f} ₽ (изменить)",
+            callback_data="admin:partners:price",
+        )],
+        [InlineKeyboardButton(text="➕ Добавить рефовода", callback_data="admin:partner:add")],
+    ]
     for partner in partners:
         emoji, _ = _partner_status(partner)
         rows.append([InlineKeyboardButton(
@@ -1546,11 +1566,11 @@ def _partners_page_keyboard(
 
 
 async def _edit_partners_page(callback: CallbackQuery, session_factory, page: int) -> None:
-    partners, users_by_id, total_pages = await _get_partners_page(session_factory, page)
+    partners, users_by_id, total_pages, price = await _get_partners_page(session_factory, page)
     actual_page = max(0, min(page, total_pages - 1)) if total_pages else 0
     await callback.message.edit_text(
-        _partners_menu_text(actual_page, total_pages),
-        reply_markup=_partners_page_keyboard(partners, users_by_id, actual_page, total_pages),
+        _partners_menu_text(actual_page, total_pages, price),
+        reply_markup=_partners_page_keyboard(partners, users_by_id, actual_page, total_pages, price),
     )
 
 
@@ -1564,6 +1584,47 @@ async def partners_menu(callback: CallbackQuery, session_factory) -> None:
 async def partners_page(callback: CallbackQuery, session_factory) -> None:
     await _edit_partners_page(callback, session_factory, int(callback.data.rsplit(":", 1)[1]))
     await callback.answer()
+
+
+@admin_router.callback_query(F.data == "admin:partners:price")
+async def request_subscription_price(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(PricingForm.waiting_price)
+    await callback.message.answer(
+        "Пришли новую цену за одну подписку в рублях, например: 0.5",
+        reply_markup=_with_cancel(),
+    )
+    await callback.answer()
+
+
+@admin_router.message(StateFilter(PricingForm.waiting_price))
+async def receive_subscription_price(message: Message, state: FSMContext, session_factory) -> None:
+    if _is_cancel_text(message):
+        await _cancel_admin_input_message(message, state)
+        return
+
+    try:
+        price = Decimal((message.text or "").strip().replace(",", "."))
+    except (InvalidOperation, ValueError):
+        price = Decimal("-1")
+
+    if not price.is_finite() or price < 0:
+        await message.answer(
+            "Пришли неотрицательную конечную цену числом, например: 0.5",
+            reply_markup=_with_cancel(),
+        )
+        return
+
+    async with session_factory() as session:
+        await set_subscription_price(session, price)
+    await state.clear()
+    await message.answer(f"Цена подписки обновлена: {price:.2f} ₽.")
+    partners, users_by_id, total_pages, current_price = await _get_partners_page(session_factory, 0)
+    await message.answer(
+        _partners_menu_text(0, total_pages, current_price),
+        reply_markup=_partners_page_keyboard(
+            partners, users_by_id, 0, total_pages, current_price
+        ),
+    )
 
 
 @admin_router.callback_query(F.data == "admin:partner:add")
@@ -1617,10 +1678,10 @@ async def _process_partner_user(telegram_id: int, message: Message, state: FSMCo
         )
     else:
         await message.answer(f"Пользователь #{telegram_id} уже рефовод (код: `{partner.referral_code}`).")
-    partners, users_by_id, total_pages = await _get_partners_page(session_factory, 0)
+    partners, users_by_id, total_pages, price = await _get_partners_page(session_factory, 0)
     await message.answer(
-        _partners_menu_text(0, total_pages),
-        reply_markup=_partners_page_keyboard(partners, users_by_id, 0, total_pages),
+        _partners_menu_text(0, total_pages, price),
+        reply_markup=_partners_page_keyboard(partners, users_by_id, 0, total_pages, price),
     )
 
 
