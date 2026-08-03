@@ -238,6 +238,9 @@ async def test_process_partner_user_approves_selected_user(session_factory):
 
     assert state.current_state is None
     assert any("Рефовод #100 добавлен" in text for text, _ in message.answers)
+    partners_menu = next(kwargs["reply_markup"] for text, kwargs in message.answers if "Рефоводы" in text)
+    assert partners_menu.inline_keyboard
+    assert not any(text == "Админ-панель:" for text, _ in message.answers)
 
 
 @pytest.mark.asyncio

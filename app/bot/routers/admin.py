@@ -448,7 +448,6 @@ async def receive_welcome_content(
     await state.clear()
     await message.answer("Приветствие обновлено.")
     await _send_welcome_menu(message, session_factory, settings)
-    await _send_admin_menu(message)
 
 
 @admin_router.callback_query(F.data == "admin:broadcast:new")
@@ -577,7 +576,6 @@ async def cancel_broadcast(callback: CallbackQuery, state: FSMContext) -> None:
 @admin_router.callback_query(F.data == "admin:broadcast:scheduled")
 async def list_scheduled_broadcasts(callback: CallbackQuery, session_factory) -> None:
     await _edit_scheduled_broadcasts(callback, session_factory)
-    await _send_admin_menu(callback.message)
     await callback.answer()
 
 
@@ -840,7 +838,6 @@ async def receive_invite_link(message: Message, state: FSMContext, session_facto
     await state.clear()
     await message.answer(f"Спонсор «{data['title']}» сохранён.")
     await _send_sponsors(message, session_factory)
-    await _send_admin_menu(message)
 
 
 VISIBLE_CAMPAIGN_STATUSES = (
@@ -948,9 +945,7 @@ async def receive_campaign_limit(message: Message, state: FSMContext) -> None:
     )
 
 
-async def _create_campaign_from_state(
-    message: Message, state: FSMContext, session_factory, *, show_admin_menu: bool = True
-) -> None:
+async def _create_campaign_from_state(message: Message, state: FSMContext, session_factory) -> None:
     data = await state.get_data()
     async with session_factory() as session:
         session.add(Campaign(
@@ -962,8 +957,6 @@ async def _create_campaign_from_state(
     await state.clear()
     await message.answer("Кампания создана.")
     await _send_campaigns(message, session_factory)
-    if show_admin_menu:
-        await _send_admin_menu(message)
 
 
 @admin_router.message(StateFilter(CampaignForm.waiting_schedule))
@@ -1004,11 +997,8 @@ async def receive_campaign_schedule(message: Message, state: FSMContext, session
 
 @admin_router.callback_query(StateFilter(CampaignForm.waiting_schedule), F.data == "admin:campaign:confirm_create")
 async def confirm_campaign_create(callback: CallbackQuery, state: FSMContext, session_factory) -> None:
-    await _create_campaign_from_state(
-        callback.message, state, session_factory, show_admin_menu=False
-    )
+    await _create_campaign_from_state(callback.message, state, session_factory)
     await _edit_campaigns(callback, session_factory)
-    await _send_admin_menu(callback.message)
     await callback.answer()
 
 
@@ -1017,7 +1007,6 @@ async def cancel_campaign_create(callback: CallbackQuery, state: FSMContext, ses
     await state.clear()
     await callback.message.answer("Создание кампании отменено.")
     await _edit_campaigns(callback, session_factory)
-    await _send_admin_menu(callback.message)
     await callback.answer()
 
 
@@ -1197,7 +1186,6 @@ async def confirm_campaign_cancel(callback: CallbackQuery, session_factory) -> N
         campaign = await cancel_campaign(session, campaign_id, callback.from_user.id)
     await callback.message.answer("Кампания отменена." if campaign else "Кампания не найдена.")
     await _edit_campaigns(callback, session_factory)
-    await _send_admin_menu(callback.message)
     await callback.answer()
 
 
@@ -1376,7 +1364,6 @@ async def confirm_admin_revoke(callback: CallbackQuery, session_factory) -> None
         await callback.answer("Администратор не найден.", show_alert=True)
         return
     await _edit_admins_list(callback, session_factory, viewer)
-    await _send_admin_menu(callback.message)
     await callback.answer()
 
 
@@ -1496,7 +1483,6 @@ async def choose_admin_payout_permission(callback: CallbackQuery, state: FSMCont
     )
     if viewer is not None:
         await _edit_admins_list(callback, session_factory, viewer)
-    await _send_admin_menu(callback.message)
     await callback.answer()
 
 
@@ -1636,7 +1622,6 @@ async def _process_partner_user(telegram_id: int, message: Message, state: FSMCo
         _partners_menu_text(0, total_pages),
         reply_markup=_partners_page_keyboard(partners, users_by_id, 0, total_pages),
     )
-    await _send_admin_menu(message)
 
 
 @admin_router.message(StateFilter(PartnerForm.waiting_user), F.users_shared)
@@ -1781,7 +1766,6 @@ async def confirm_partner_revoke(callback: CallbackQuery, session_factory) -> No
         await callback.answer("Рефовод не найден.", show_alert=True)
         return
     await _edit_partner_card(callback, session_factory, telegram_id)
-    await _send_admin_menu(callback.message)
     await callback.answer()
 
 
@@ -1846,7 +1830,6 @@ async def confirm_partner_balance_zero(callback: CallbackQuery, session_factory)
         amount = await zero_out_partner_balance(session, telegram_id, callback.from_user.id)
     await _edit_partner_card(callback, session_factory, telegram_id)
     await callback.answer(f"Обнулено: {amount:.2f} ₽.")
-    await _send_admin_menu(callback.message)
 
 
 @admin_router.callback_query(
@@ -1933,7 +1916,6 @@ async def receive_partner_balance_title(message: Message, state: FSMContext, ses
     await state.clear()
     await message.answer(f"Баланс пополнен на {amount:.2f} ₽ ({title}).", reply_markup=ReplyKeyboardRemove())
     await _send_partner_card(message, session_factory, telegram_id)
-    await _send_admin_menu(message)
 
 
 def _codes_keyboard() -> InlineKeyboardMarkup:
@@ -2006,7 +1988,6 @@ async def receive_code_search(message: Message, state: FSMContext, session_facto
         await _send_admin_menu(message)
         return
     await message.answer(_code_card_text(movie_code), reply_markup=_code_card_keyboard(movie_code))
-    await _send_admin_menu(message)
 
 
 @admin_router.callback_query(F.data == "admin:code:add")

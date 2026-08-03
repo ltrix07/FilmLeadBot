@@ -15,10 +15,12 @@ from app.bot.keyboards import build_gate_keyboard, sponsor_url
 from app.bot.routers.admin import (
     AdminGrantForm,
     CodeAddForm,
+    CodeSearchForm,
     CampaignForm,
     PartnerBalanceForm,
     SponsorForm,
     _admin_menu_keyboard,
+    _welcome_menu_keyboard,
     _admins_keyboard,
     _edit_partners_page,
     _get_partner_card_data,
@@ -41,6 +43,8 @@ from app.bot.routers.admin import (
     choose_sponsor_request_mode,
     confirm_partner_balance_zero,
     confirm_partner_revoke,
+    confirm_campaign_cancel,
+    confirm_campaign_create,
     confirm_admin_revoke,
     choose_admin_manage_permission,
     choose_admin_payout_permission,
@@ -51,6 +55,9 @@ from app.bot.routers.admin import (
     request_partner_balance_zero,
     request_partner_revoke,
     receive_invite_link,
+    receive_welcome_content,
+    receive_code_search,
+    list_scheduled_broadcasts,
     receive_new_code,
     text_admin_menu,
     toggle_admin_permission,
@@ -65,7 +72,11 @@ from app.db.models import (
     ReferralEvent,
     ReferralPartner,
     PartnerBalanceAdjustment,
+    MovieCode,
+    MovieCodeStatus,
     PendingAdminGrant,
+    Campaign,
+    CampaignStatus,
     Sponsor,
     SponsorType,
     User,
@@ -126,6 +137,9 @@ async def test_choose_sponsor_request_mode_yes_saves_request_mode(session_factor
     await receive_invite_link(message, state, session_factory)
     async with session_factory() as session:
         assert (await session.get(Sponsor, -101)).request_mode is True
+    keyboard = message.answer.await_args.kwargs["reply_markup"]
+    assert any(button.text.endswith("Join requests") for row in keyboard.inline_keyboard for button in row)
+    assert not any(call.args == ("Админ-панель:",) for call in message.answer.await_args_list)
     await storage.close()
 
 
@@ -154,6 +168,7 @@ async def test_choose_sponsor_request_mode_no_saves_disabled_request_mode(sessio
     await receive_invite_link(message, state, session_factory)
     async with session_factory() as session:
         assert (await session.get(Sponsor, -102)).request_mode is False
+    assert not any(call.args == ("Админ-панель:",) for call in message.answer.await_args_list)
     await storage.close()
 
 
@@ -370,7 +385,6 @@ async def test_command_cancel_removes_reply_keyboard_for_sponsor_picker():
     ("handler", "needs_session_factory"),
     [
         (cancel_broadcast, False),
-        (cancel_campaign_create, True),
         (cancel_campaign_limit_decrease, False),
         (cancel_codes_import, False),
         (cancel_code_title_edit, False),
@@ -396,6 +410,137 @@ async def test_specific_admin_cancellations_restore_admin_menu(
         and call.kwargs.get("reply_markup") == _admin_menu_keyboard()
         for call in callback.message.answer.await_args_list
     )
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_campaign_create_returns_campaigns_list_without_admin_menu(session_factory):
+    storage = MemoryStorage()
+    state = FSMContext(storage, StorageKey(bot_id=1, chat_id=1, user_id=1))
+    message = SimpleNamespace(answer=AsyncMock(), edit_text=AsyncMock())
+    callback = SimpleNamespace(message=message, answer=AsyncMock())
+
+    await cancel_campaign_create(callback, state, session_factory)
+
+    keyboard = message.edit_text.await_args.kwargs["reply_markup"]
+    assert any(button.text == "➕ Новая кампания" for row in keyboard.inline_keyboard for button in row)
+    assert not any(call.args == ("Админ-панель:",) for call in message.answer.await_args_list)
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_receive_welcome_content_returns_welcome_menu_without_admin_menu(session_factory):
+    storage = MemoryStorage()
+    state = FSMContext(storage, StorageKey(bot_id=1, chat_id=1, user_id=1))
+    message = SimpleNamespace(
+        html_text="<b>New welcome</b>",
+        caption=None,
+        chat=SimpleNamespace(id=1),
+        message_id=42,
+        answer=AsyncMock(),
+    )
+    settings = SimpleNamespace(welcome_message="Default welcome")
+
+    await receive_welcome_content(message, state, session_factory, settings)
+
+    assert any(
+        call.kwargs.get("reply_markup") == _welcome_menu_keyboard()
+        for call in message.answer.await_args_list
+    )
+    assert not any(call.args == ("Админ-панель:",) for call in message.answer.await_args_list)
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_confirm_campaign_create_returns_campaigns_list_without_admin_menu(session_factory):
+    async with session_factory() as session:
+        sponsor = Sponsor(chat_id=-100, title="Sponsor", type=SponsorType.CHANNEL)
+        session.add(sponsor)
+        session.add_all(
+            Campaign(
+                sponsor_chat_id=sponsor.chat_id,
+                limit_original=10,
+                limit_current=10,
+                status=CampaignStatus.ACTIVE,
+            )
+            for _ in range(5)
+        )
+        await session.commit()
+
+    storage = MemoryStorage()
+    state = FSMContext(storage, StorageKey(bot_id=1, chat_id=1, user_id=1))
+    await state.set_state(CampaignForm.waiting_schedule)
+    await state.update_data(sponsor_chat_id=-100, limit=20, status=CampaignStatus.ACTIVE.value)
+    message = SimpleNamespace(answer=AsyncMock(), edit_text=AsyncMock())
+    callback = SimpleNamespace(message=message, answer=AsyncMock())
+
+    await confirm_campaign_create(callback, state, session_factory)
+
+    keyboard = message.edit_text.await_args.kwargs["reply_markup"]
+    assert any(button.text == "➕ Новая кампания" for row in keyboard.inline_keyboard for button in row)
+    assert not any(call.args == ("Админ-панель:",) for call in message.answer.await_args_list)
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_confirm_campaign_cancel_returns_updated_list_without_admin_menu(session_factory):
+    async with session_factory() as session:
+        session.add_all([
+            Admin(telegram_id=1),
+            Sponsor(chat_id=-100, title="Sponsor", type=SponsorType.CHANNEL),
+        ])
+        await session.flush()
+        campaign = Campaign(
+            sponsor_chat_id=-100,
+            limit_original=10,
+            limit_current=10,
+            status=CampaignStatus.ACTIVE,
+        )
+        session.add(campaign)
+        await session.commit()
+        campaign_id = campaign.id
+
+    message = SimpleNamespace(answer=AsyncMock(), edit_text=AsyncMock())
+    callback = SimpleNamespace(
+        data=f"admin:campaign:{campaign_id}:cancel:confirm",
+        from_user=SimpleNamespace(id=1),
+        message=message,
+        answer=AsyncMock(),
+    )
+
+    await confirm_campaign_cancel(callback, session_factory)
+
+    assert message.edit_text.await_args.args == ("Кампаний пока нет.",)
+    assert not any(call.args == ("Админ-панель:",) for call in message.answer.await_args_list)
+    async with session_factory() as session:
+        assert (await session.get(Campaign, campaign_id)).status is CampaignStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_scheduled_broadcasts_list_does_not_append_admin_menu(session_factory):
+    message = SimpleNamespace(answer=AsyncMock(), edit_text=AsyncMock())
+    callback = SimpleNamespace(message=message, answer=AsyncMock())
+
+    await list_scheduled_broadcasts(callback, session_factory)
+
+    assert message.edit_text.await_args.kwargs["reply_markup"].inline_keyboard
+    assert not message.answer.await_args_list
+
+
+@pytest.mark.asyncio
+async def test_code_search_found_returns_card_without_admin_menu(session_factory):
+    async with session_factory() as session:
+        session.add(MovieCode(code="123", title="Film", status=MovieCodeStatus.ACTIVE))
+        await session.commit()
+    storage = MemoryStorage()
+    state = FSMContext(storage, StorageKey(bot_id=1, chat_id=1, user_id=1))
+    await state.set_state(CodeSearchForm.waiting_code)
+    message = SimpleNamespace(text="123", answer=AsyncMock())
+
+    await receive_code_search(message, state, session_factory)
+
+    assert message.answer.await_args.kwargs["reply_markup"].inline_keyboard
+    assert not any(call.args == ("Админ-панель:",) for call in message.answer.await_args_list)
     await storage.close()
 
 
@@ -549,7 +694,7 @@ async def test_partner_card_includes_stats_and_formatted_balance(session_factory
 
 
 @pytest.mark.asyncio
-async def test_confirm_partner_revoke_returns_updated_card_and_admin_menu(session_factory):
+async def test_confirm_partner_revoke_returns_updated_card_without_admin_menu(session_factory):
     await _create_partner(session_factory)
     message = SimpleNamespace(answer=AsyncMock(), edit_text=AsyncMock())
 
@@ -567,10 +712,7 @@ async def test_confirm_partner_revoke_returns_updated_card_and_admin_menu(sessio
     keyboard = message.edit_text.await_args.kwargs["reply_markup"]
     assert "Статус: отозван" in text
     assert "🚫 Отозвать" not in [button.text for row in keyboard.inline_keyboard for button in row]
-    assert any(
-        call.args == ("Админ-панель:",) and call.kwargs["reply_markup"] == _admin_menu_keyboard()
-        for call in message.answer.await_args_list
-    )
+    assert not any(call.args == ("Админ-панель:",) for call in message.answer.await_args_list)
 
 
 @pytest.mark.asyncio
@@ -595,7 +737,7 @@ async def test_zero_partner_balance_creates_withdrawal_and_returns_card(session_
         (Decimal("-150.75"), "Вывод"),
     ]
     assert "Баланс: 0.00 ₽" in message.edit_text.await_args.args[0]
-    assert any(call.args == ("Админ-панель:",) for call in message.answer.await_args_list)
+    assert not any(call.args == ("Админ-панель:",) for call in message.answer.await_args_list)
 
 
 @pytest.mark.asyncio
@@ -654,7 +796,7 @@ async def test_partner_balance_title_requires_nonempty_value():
 
 
 @pytest.mark.asyncio
-async def test_partner_balance_add_creates_exact_adjustment_and_restores_menu(session_factory):
+async def test_partner_balance_add_creates_exact_adjustment_and_returns_card(session_factory):
     await _create_partner(session_factory)
     storage = MemoryStorage()
     state = FSMContext(storage, StorageKey(bot_id=1, chat_id=1, user_id=900))
@@ -670,7 +812,7 @@ async def test_partner_balance_add_creates_exact_adjustment_and_restores_menu(se
     assert (adjustment.amount, adjustment.title) == (Decimal("500.50"), "Доплата")
     assert await state.get_state() is None
     assert any("Баланс: 500.50 ₽" in call.args[0] for call in title_message.answer.await_args_list)
-    assert any(call.args == ("Админ-панель:",) for call in title_message.answer.await_args_list)
+    assert not any(call.args == ("Админ-панель:",) for call in title_message.answer.await_args_list)
     await storage.close()
 
 
@@ -731,7 +873,7 @@ async def test_admins_menu_shows_management_controls_only_to_authorized_viewers(
 
 
 @pytest.mark.asyncio
-async def test_admin_grant_flow_creates_permissions_clears_state_and_restores_menu(session_factory):
+async def test_admin_grant_flow_creates_permissions_clears_state_and_returns_admins_list(session_factory):
     async with session_factory() as session:
         session.add_all([Admin(telegram_id=900, role="owner"), User(telegram_id=100)])
         await session.commit()
@@ -754,7 +896,8 @@ async def test_admin_grant_flow_creates_permissions_clears_state_and_restores_me
         admin = await session.scalar(select(Admin).where(Admin.telegram_id == 100))
     assert (admin.can_manage_admins, admin.can_manage_payouts) == (True, False)
     assert await state.get_state() is None
-    assert any(call.args == ("Админ-панель:",) for call in message.answer.await_args_list)
+    assert "Администраторы:" in message.edit_text.await_args.args[0]
+    assert not any(call.args == ("Админ-панель:",) for call in message.answer.await_args_list)
     await storage.close()
 
 
