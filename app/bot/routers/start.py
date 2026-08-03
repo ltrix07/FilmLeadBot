@@ -168,4 +168,5 @@ async def cmd_start(
         await message.answer(
             render_gate_text(result.missing_sponsors),
             reply_markup=build_gate_keyboard(result.subscribed_sponsors, result.missing_sponsors),
+            parse_mode="HTML",
         )

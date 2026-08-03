@@ -20,7 +20,9 @@ from app.db.models import (
 from app.services.partners import (
     approve_partner,
     format_partner_label,
+    format_partner_self_stats_text,
     get_partner_stats,
+    get_partner_menu_keyboard,
     revoke_partner,
 )
 
@@ -148,11 +150,24 @@ async def test_partner_trigger_filter_matches_only_non_revoked_partners(session_
     async with session_factory() as session:
         await approve_partner(session, 100, 800)
     assert await trigger(message, session_factory) is True
+    for text in ("ПАРТНЕРКА", "партнёрка", "РЕФКА", "рефералка", "/PARTNER"):
+        assert await trigger(SimpleNamespace(text=text, from_user=SimpleNamespace(id=100)), session_factory)
     assert await trigger(SimpleNamespace(text="не партнёр", from_user=SimpleNamespace(id=100)), session_factory) is False
 
     async with session_factory() as session:
         await revoke_partner(session, 100)
     assert await trigger(message, session_factory) is False
+
+
+def test_partner_cabinet_labels_and_self_stats_text():
+    keyboard = get_partner_menu_keyboard()
+    assert [row[0].text for row in keyboard.inline_keyboard] == [
+        "🔗 Моя реф. ссылка", "📊 Статистика", "💰 Баланс", "📄 Скачать коды & названия"
+    ]
+    assert format_partner_self_stats_text(2, 3) == (
+        "Общее количество приведенных Вами пользователей: 2\n\n"
+        "Суммарное количество выполненных подписок Вашими рефералами: 3"
+    )
 
 
 @pytest.mark.parametrize(

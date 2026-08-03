@@ -45,8 +45,8 @@ def get_partner_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔗 Моя реф. ссылка", callback_data="partner:link")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="partner:stats")],
-        [InlineKeyboardButton(text="📄 Скачать коды/названия", callback_data="partner:codes_export")],
         [InlineKeyboardButton(text="💰 Баланс", callback_data="partner:balance")],
+        [InlineKeyboardButton(text="📄 Скачать коды & названия", callback_data="partner:codes_export")],
     ])
 
 
@@ -71,6 +71,13 @@ async def get_partner_stats(session: AsyncSession, telegram_id: int) -> tuple[in
 
 def format_partner_stats_text(started: int, confirmed: int) -> str:
     return f"Приведено пользователей: {started}\nПрошли обязательные подписки: {confirmed}"
+
+
+def format_partner_self_stats_text(started: int, confirmed: int) -> str:
+    return (
+        f"Общее количество приведенных Вами пользователей: {started}\n\n"
+        f"Суммарное количество выполненных подписок Вашими рефералами: {confirmed}"
+    )
 
 
 async def is_active_partner(session: AsyncSession, telegram_id: int) -> bool:

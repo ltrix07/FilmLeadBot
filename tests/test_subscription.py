@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timezone
+from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
@@ -22,6 +23,8 @@ from app.db.models import (
 )
 from app.services.subscription import SubscriptionAccessService, _record_campaign_completions
 from app.services.partners import get_partner_stats
+from app.services.partner_balance import get_partner_balance
+from app.services.settings import set_subscription_price
 
 
 async def add_campaigns(session_factory, count: int = 2) -> list[Campaign]:
@@ -179,19 +182,65 @@ async def test_subscribed_user_is_counted_once_and_cache_can_refresh(session_fac
 
 
 @pytest.mark.asyncio
-async def test_missing_sponsor_does_not_count_user(session_factory):
-    await add_campaigns(session_factory)
+async def test_partial_sponsor_subscriptions_are_credited_per_campaign(session_factory):
+    campaigns = await add_campaigns(session_factory, count=4)
     await add_user(session_factory, 3)
+    await add_user(session_factory, 100)
+    async with session_factory() as session:
+        session.add(ReferralEvent(referred_user_telegram_id=3, referrer_telegram_id=100))
+        await set_subscription_price(session, Decimal("5.00"))
+        await session.commit()
+
     bot = AsyncMock()
-    bot.get_chat_member.side_effect = [member(ChatMemberStatus.MEMBER), member(ChatMemberStatus.LEFT)]
+    bot.get_chat_member.side_effect = [
+        member(ChatMemberStatus.MEMBER),
+        member(ChatMemberStatus.LEFT),
+        member(ChatMemberStatus.MEMBER),
+        member(ChatMemberStatus.LEFT),
+    ]
+    service = SubscriptionAccessService(ttl_seconds=60)
 
     async with session_factory() as session:
-        result = await SubscriptionAccessService(60).evaluate_user_access(session, bot, 3)
+        result = await service.evaluate_user_access(session, bot, 3)
     assert not result.passed
-    assert len(result.missing_sponsors) == 1
+    assert {sponsor.chat_id for sponsor in result.missing_sponsors} == {
+        campaigns[1].sponsor_chat_id,
+        campaigns[3].sponsor_chat_id,
+    }
 
     async with session_factory() as session:
-        assert await session.scalar(select(func.count()).select_from(CampaignCompletion)) == 0
+        counters = list(await session.scalars(select(Campaign.counter).order_by(Campaign.id)))
+        credits = list(await session.scalars(select(ReferralSubscription)))
+        referral_event = await session.scalar(select(ReferralEvent))
+        assert await get_partner_stats(session, 100) == (1, 2)
+        assert await get_partner_balance(session, 100) == Decimal("10.00")
+    assert counters == [1, 0, 1, 0]
+    assert {(credit.campaign_id, credit.referred_user_telegram_id) for credit in credits} == {
+        (campaigns[0].id, 3),
+        (campaigns[2].id, 3),
+    }
+    assert referral_event.confirmed_at is None
+
+    async with session_factory() as session:
+        repeated = await service.evaluate_user_access(session, bot, 3)
+    assert not repeated.passed
+
+    async with session_factory() as session:
+        counters = list(await session.scalars(select(Campaign.counter).order_by(Campaign.id)))
+        assert await session.scalar(select(func.count()).select_from(ReferralSubscription)) == 2
+    assert counters == [1, 0, 1, 0]
+
+    bot.get_chat_member.side_effect = [member(ChatMemberStatus.MEMBER)] * 4
+    async with session_factory() as session:
+        result = await service.evaluate_user_access(session, bot, 3, force_refresh=True)
+    assert result.passed
+
+    async with session_factory() as session:
+        counters = list(await session.scalars(select(Campaign.counter).order_by(Campaign.id)))
+        assert await session.scalar(select(func.count()).select_from(ReferralSubscription)) == 4
+        referral_event = await session.scalar(select(ReferralEvent))
+    assert counters == [1, 1, 1, 1]
+    assert referral_event.confirmed_at is not None
 
 
 @pytest.mark.asyncio

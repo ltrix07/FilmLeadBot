@@ -7,10 +7,15 @@ import pytest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import ReplyKeyboardRemove
+from aiogram.types import Message, ReplyKeyboardRemove
 from sqlalchemy import func, select
 
-from app.bot.gate import render_gate_text, render_menu_text
+from app.bot.gate import (
+    SubscriptionGateMiddleware,
+    check_subscription,
+    render_gate_text,
+    render_menu_text,
+)
 from app.bot.keyboards import build_gate_keyboard, sponsor_url
 from app.bot.routers.admin import (
     AdminGrantForm,
@@ -29,8 +34,6 @@ from app.bot.routers.admin import (
     _partner_card_text,
     _partner_card_keyboard,
     _partners_page_keyboard,
-    _sponsors_keyboard,
-    _sponsors_text,
     add_admin_start,
     admin_router,
     admins_menu,
@@ -69,7 +72,15 @@ from app.bot.routers.admin import (
 )
 from app.bot.filters import IsAdmin
 from app.bot.routers.menu import handle_movie_code
-from app.bot.routers.start import _ensure_user_and_referral, _send_welcome_message
+from app.bot.routers.partner import (
+    activate_partner,
+    partner_balance,
+    partner_codes_export,
+    partner_link,
+    partner_menu,
+    partner_stats,
+)
+from app.bot.routers.start import _ensure_user_and_referral, _send_welcome_message, cmd_start
 from app.db.models import (
     Admin,
     ReferralEvent,
@@ -111,7 +122,7 @@ async def test_toggle_own_sponsor_channel_updates_flag_and_rerenders(session_fac
     text, = message.edit_text.await_args.args
     keyboard = message.edit_text.await_args.kwargs["reply_markup"]
     assert "· своё" in text
-    assert keyboard.inline_keyboard[0][0].text == "✅ Своё: Own project"
+    assert keyboard.inline_keyboard[0][0].text == "✅ Своё"
     callback.answer.assert_awaited_once()
 
 
@@ -141,7 +152,7 @@ async def test_choose_sponsor_request_mode_yes_saves_request_mode(session_factor
     async with session_factory() as session:
         assert (await session.get(Sponsor, -101)).request_mode is True
     keyboard = message.answer.await_args.kwargs["reply_markup"]
-    assert any(button.text.endswith("Join requests") for row in keyboard.inline_keyboard for button in row)
+    assert any(button.text.endswith("Join requests (канал)") for row in keyboard.inline_keyboard for button in row)
     assert not any(call.args == ("Админ-панель:",) for call in message.answer.await_args_list)
     await storage.close()
 
@@ -194,26 +205,11 @@ async def test_toggle_sponsor_request_mode_updates_flag_and_rerenders(session_fa
     text, = message.edit_text.await_args.args
     keyboard = message.edit_text.await_args.kwargs["reply_markup"]
     assert "· заявки" in text
-    assert keyboard.inline_keyboard[0][1].text == "✅ Заявки: Requests"
+    assert keyboard.inline_keyboard[0][1].text == "✅ Заявки"
 
     await toggle_sponsor_request_mode(callback, session_factory)
     async with session_factory() as session:
         assert (await session.get(Sponsor, -103)).request_mode is False
-
-
-def test_sponsors_text_marks_only_request_mode_sponsors():
-    requested = Sponsor(chat_id=-104, title="Requested", type=SponsorType.CHANNEL, request_mode=True)
-    regular = Sponsor(chat_id=-105, title="Regular", type=SponsorType.CHANNEL, request_mode=False)
-
-    assert "Requested (канал) · заявки" in _sponsors_text([requested])
-    assert "Regular (канал) · заявки" not in _sponsors_text([regular])
-
-
-def test_own_sponsor_text_and_keyboard():
-    sponsor = Sponsor(chat_id=-100, title="Own project", type=SponsorType.CHANNEL, own_channel=True)
-
-    assert "· своё" in _sponsors_text([sponsor])
-    assert _sponsors_keyboard([sponsor]).inline_keyboard[0][0].text == "✅ Своё: Own project"
 
 
 @pytest.mark.asyncio
@@ -327,6 +323,152 @@ async def test_send_welcome_message_falls_back_when_copy_fails(session_factory):
     await _send_welcome_message(message, bot, session_factory, settings)
 
     message.answer.assert_awaited_once_with("Default welcome")
+
+
+@pytest.mark.asyncio
+async def test_subscription_gate_middleware_sends_html_gate_text(session_factory):
+    service = SimpleNamespace(evaluate_user_access=AsyncMock(return_value=AccessResult(
+        passed=False, is_partner=False, subscribed_sponsors=[], missing_sponsors=[],
+        newly_completed_campaigns=[], errored_campaigns=[],
+    )))
+    message = Message.model_construct(from_user=SimpleNamespace(id=100))
+    object.__setattr__(message, "answer", AsyncMock())
+
+    result = await SubscriptionGateMiddleware(service)(
+        AsyncMock(), message, {"session_factory": session_factory, "bot": SimpleNamespace()}
+    )
+
+    assert result is None
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.kwargs["parse_mode"] == "HTML"
+
+
+@pytest.mark.asyncio
+async def test_check_subscription_renders_failed_gate_as_html(session_factory):
+    service = SimpleNamespace(evaluate_user_access=AsyncMock(return_value=AccessResult(
+        passed=False, is_partner=False, subscribed_sponsors=[], missing_sponsors=[],
+        newly_completed_campaigns=[], errored_campaigns=[],
+    )))
+    message = SimpleNamespace(edit_text=AsyncMock())
+    callback = SimpleNamespace(from_user=SimpleNamespace(id=100), message=message, answer=AsyncMock())
+
+    await check_subscription(callback, session_factory, service, SimpleNamespace())
+
+    assert message.edit_text.await_args.kwargs["parse_mode"] == "HTML"
+
+
+@pytest.mark.asyncio
+async def test_start_renders_failed_gate_as_html(session_factory):
+    service = SimpleNamespace(evaluate_user_access=AsyncMock(return_value=AccessResult(
+        passed=False, is_partner=False, subscribed_sponsors=[], missing_sponsors=[],
+        newly_completed_campaigns=[], errored_campaigns=[],
+    )))
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=100, username="user", full_name="User"), answer=AsyncMock()
+    )
+    bot = SimpleNamespace(copy_message=AsyncMock())
+
+    await cmd_start(
+        message, SimpleNamespace(args=None), session_factory, service, bot,
+        SimpleNamespace(welcome_message="Welcome"),
+    )
+
+    assert message.answer.await_args_list[-1].kwargs["parse_mode"] == "HTML"
+
+
+@pytest.mark.asyncio
+async def test_activate_partner_sends_welcome_only_on_first_activation(session_factory):
+    await _create_partner(session_factory, telegram_id=100)
+    first_message = SimpleNamespace(from_user=SimpleNamespace(id=100), answer=AsyncMock())
+
+    await activate_partner(first_message, session_factory, SimpleNamespace())
+
+    first_calls = first_message.answer.await_args_list
+    assert "Добро пожаловать в реферальную программу" in first_calls[0].args[0]
+    assert first_calls[0].kwargs["parse_mode"] == "HTML"
+    assert "Ваш кабинет партнера" in first_calls[1].args[0]
+    assert first_calls[1].kwargs["parse_mode"] == "HTML"
+
+    repeated_message = SimpleNamespace(from_user=SimpleNamespace(id=100), answer=AsyncMock())
+    await activate_partner(repeated_message, session_factory, SimpleNamespace())
+    repeated_message.answer.assert_awaited_once()
+    assert "Ваш кабинет партнера" in repeated_message.answer.await_args.args[0]
+
+
+async def _activate_partner_record(session_factory, telegram_id: int = 100) -> None:
+    async with session_factory() as session:
+        partner = await session.scalar(
+            select(ReferralPartner).where(ReferralPartner.telegram_id == telegram_id)
+        )
+        partner.activated_at = datetime.now(timezone.utc)
+        await session.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("handler", "data", "expected"),
+    [
+        (partner_link, "partner:link", "Ваша реферальная ссылка"),
+        (partner_stats, "partner:stats", "Общее количество приведенных"),
+        (partner_balance, "partner:balance", "Ваш текущий баланс"),
+        (partner_menu, "partner:menu", "Ваш кабинет партнера"),
+    ],
+)
+async def test_partner_cabinet_pages_edit_message_with_back_or_menu_keyboard(
+    session_factory, handler, data, expected
+):
+    await _create_partner(session_factory)
+    await _activate_partner_record(session_factory)
+    message = SimpleNamespace(answer=AsyncMock(), edit_text=AsyncMock())
+    callback = SimpleNamespace(from_user=SimpleNamespace(id=100), message=message, answer=AsyncMock())
+    args = (callback, session_factory, SimpleNamespace(get_me=AsyncMock(return_value=SimpleNamespace(username="bot")))) if handler is partner_link else (callback, session_factory)
+
+    await handler(*args)
+
+    text = message.edit_text.await_args.args[0]
+    keyboard = message.edit_text.await_args.kwargs["reply_markup"]
+    assert expected in text
+    if handler is partner_menu:
+        assert keyboard.inline_keyboard[0][0].text == "🔗 Моя реф. ссылка"
+    else:
+        button = keyboard.inline_keyboard[0][0]
+        assert (button.text, button.callback_data) == ("⬅️ Назад", "partner:menu")
+    message.answer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("handler", "data"),
+    [
+        (partner_link, "partner:link"),
+        (partner_stats, "partner:stats"),
+        (partner_balance, "partner:balance"),
+        (partner_menu, "partner:menu"),
+    ],
+)
+async def test_partner_cabinet_pages_deny_inactive_partners(session_factory, handler, data):
+    message = SimpleNamespace(answer=AsyncMock(), edit_text=AsyncMock())
+    callback = SimpleNamespace(from_user=SimpleNamespace(id=100), message=message, answer=AsyncMock())
+    args = (callback, session_factory, SimpleNamespace(get_me=AsyncMock())) if handler is partner_link else (callback, session_factory)
+
+    await handler(*args)
+
+    callback.answer.assert_awaited_once_with("Доступно только рефоводам.", show_alert=True)
+    message.edit_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_partner_codes_export_includes_descriptive_caption(session_factory):
+    await _create_partner(session_factory)
+    await _activate_partner_record(session_factory)
+    message = SimpleNamespace(answer_document=AsyncMock())
+    callback = SimpleNamespace(from_user=SimpleNamespace(id=100), message=message, answer=AsyncMock())
+
+    await partner_codes_export(callback, session_factory)
+
+    caption = message.answer_document.await_args.kwargs["caption"]
+    assert "собраны все коды & названия" in caption
+    assert "@Anatoliy_Here" in caption
 
 
 def test_gate_keyboard_uses_username_invite_link_or_fallback_callback():
@@ -563,11 +705,9 @@ async def test_text_admin_menu_is_admin_only_router_handler(text):
 
 def test_admin_menu_and_gate_copy_are_polished():
     assert _admin_menu_keyboard().inline_keyboard[3][0].text == "👥 Рефоводы"
-    sponsor = Sponsor(chat_id=-1, title="Cinema", type=SponsorType.CHANNEL)
-    assert render_gate_text([sponsor]) == (
-        "🤖 Чтобы бот выдал название по найденному коду - подпишитесь на все каналы из списка ниже:\n"
-        "• Cinema"
-    )
+    assert render_gate_text([]) == render_gate_text([Sponsor(
+        chat_id=-1, title="Cinema", type=SponsorType.CHANNEL
+    )]) == "<b>🤖 Чтобы бот выдал название по найденному коду - подпишитесь на все каналы ниже:</b>"
     assert render_menu_text(SimpleNamespace(is_partner=False)) == (
         "🍏 Доступ открыт. Чтобы получить название - отправьте найденный Вами код."
     )

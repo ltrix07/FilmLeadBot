@@ -20,8 +20,7 @@ gate_router = Router(name="gate")
 
 
 def render_gate_text(missing: list[Sponsor]) -> str:
-    names = "\n".join(f"• {sponsor.title}" for sponsor in missing)
-    return f"🤖 Чтобы бот выдал название по найденному коду - подпишитесь на все каналы из списка ниже:\n{names}"
+    return "<b>🤖 Чтобы бот выдал название по найденному коду - подпишитесь на все каналы ниже:</b>"
 
 
 def render_menu_text(result: AccessResult) -> str:
@@ -62,9 +61,9 @@ class SubscriptionGateMiddleware(BaseMiddleware):
             text = render_gate_text(result.missing_sponsors)
             keyboard = build_gate_keyboard(result.subscribed_sponsors, result.missing_sponsors)
             if isinstance(event, Message):
-                await event.answer(text, reply_markup=keyboard)
+                await event.answer(text, reply_markup=keyboard, parse_mode="HTML")
             else:
-                await event.message.answer(text, reply_markup=keyboard)
+                await event.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
                 await event.answer()
             return None
 
@@ -95,6 +94,7 @@ async def check_subscription(callback: CallbackQuery, session_factory, subscript
         await callback.message.edit_text(
             render_gate_text(result.missing_sponsors),
             reply_markup=build_gate_keyboard(result.subscribed_sponsors, result.missing_sponsors),
+            parse_mode="HTML",
         )
         await callback.answer("Пока не все подписки выполнены")
         return

@@ -91,6 +91,12 @@ from app.services.settings import (
     set_subscription_price,
     set_welcome_message,
 )
+from app.services.sponsors import (
+    archive_sponsor,
+    count_sponsors,
+    list_sponsors as list_sponsors_service,
+    unarchive_sponsor,
+)
 from app.services.stats import get_overview_stats, get_top_codes, get_top_partners
 from app.services.bulk_import import (
     ImportPlan,
@@ -243,29 +249,6 @@ def _with_cancel(rows: list[list[InlineKeyboardButton]] | None = None) -> Inline
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _sponsors_keyboard(sponsors: list[Sponsor]) -> InlineKeyboardMarkup:
-    rows = [
-        [
-            InlineKeyboardButton(
-                text=f"{'✅ Своё' if sponsor.own_channel else '⬜ Своё'}: {sponsor.title}",
-                callback_data=f"admin:sponsor:{sponsor.chat_id}:toggle_own",
-            ),
-            InlineKeyboardButton(
-                text=f"{'✅' if sponsor.request_mode else '⬜'} Заявки: {sponsor.title}",
-                callback_data=f"admin:sponsor:{sponsor.chat_id}:toggle_request_mode",
-            ),
-        ]
-        for sponsor in sponsors
-    ]
-    rows.extend([
-        [InlineKeyboardButton(text="➕ Добавить спонсора", callback_data="admin:sponsor:add")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:menu")],
-    ])
-    return InlineKeyboardMarkup(
-        inline_keyboard=rows
-    )
-
-
 _SPONSOR_TYPE_LABELS = {
     SponsorType.CHANNEL: "канал",
     SponsorType.GROUP: "группа",
@@ -273,26 +256,76 @@ _SPONSOR_TYPE_LABELS = {
 }
 
 
-def _sponsors_text(sponsors: list[Sponsor]) -> str:
-    if not sponsors:
-        return "Спонсоров пока нет."
-    return "\n".join(
-        f"{'✅ доступен' if sponsor.bot_has_access else '⚠️ нет доступа'} — "
-        f"{sponsor.title} ({_SPONSOR_TYPE_LABELS.get(sponsor.type, sponsor.type.value)})"
-        f"{' · своё' if sponsor.own_channel else ''}"
-        f"{' · заявки' if sponsor.request_mode else ''}"
-        for sponsor in sponsors
+_SPONSORS_PER_PAGE = 10
+
+
+def _sponsor_type_label(sponsor: Sponsor) -> str:
+    return _SPONSOR_TYPE_LABELS.get(sponsor.type, sponsor.type.value)
+
+
+def _sponsors_menu_text(page: int, total_pages: int, *, archived: bool) -> str:
+    if total_pages == 0:
+        return "Архив пуст." if archived else "Спонсоров пока нет."
+    heading = "Архив спонсоров" if archived else "Спонсоры"
+    return f"{heading} (стр. {page + 1}/{total_pages}):"
+
+
+async def _get_sponsors_page(session_factory, page: int, *, archived: bool) -> tuple[list[Sponsor], int]:
+    async with session_factory() as session:
+        total = await count_sponsors(session, archived=archived)
+        total_pages = ceil(total / _SPONSORS_PER_PAGE)
+        actual_page = max(0, min(page, total_pages - 1)) if total_pages else 0
+        sponsors = await list_sponsors_service(
+            session, archived=archived, limit=_SPONSORS_PER_PAGE,
+            offset=actual_page * _SPONSORS_PER_PAGE,
+        )
+    return sponsors, total_pages
+
+
+def _sponsors_page_keyboard(
+    sponsors: list[Sponsor], page: int, total_pages: int, *, archived: bool,
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if not archived:
+        rows.append([InlineKeyboardButton(text="➕ Добавить спонсора", callback_data="admin:sponsor:add")])
+    for sponsor in sponsors:
+        status = "✅" if sponsor.bot_has_access else "⚠️"
+        rows.append([InlineKeyboardButton(
+            text=f"{status} {sponsor.title} ({_sponsor_type_label(sponsor)})",
+            callback_data=f"admin:sponsor:{sponsor.chat_id}:card",
+        )])
+    if total_pages > 1:
+        navigation = []
+        if page > 0:
+            prefix = "admin:sponsors:archived" if archived else "admin:sponsors:page"
+            navigation.append(InlineKeyboardButton(text="◀️ Пред", callback_data=f"{prefix}:{page - 1}"))
+        if page + 1 < total_pages:
+            prefix = "admin:sponsors:archived" if archived else "admin:sponsors:page"
+            navigation.append(InlineKeyboardButton(text="▶️ След", callback_data=f"{prefix}:{page + 1}"))
+        rows.append(navigation)
+    if not archived:
+        rows.append([InlineKeyboardButton(text="📦 Архив", callback_data="admin:sponsors:archived:0")])
+        rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:menu")])
+    else:
+        rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:sponsors:page:0")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _edit_sponsors_page(callback: CallbackQuery, session_factory, page: int, *, archived: bool) -> None:
+    sponsors, total_pages = await _get_sponsors_page(session_factory, page, archived=archived)
+    actual_page = max(0, min(page, total_pages - 1)) if total_pages else 0
+    await callback.message.edit_text(
+        _sponsors_menu_text(actual_page, total_pages, archived=archived),
+        reply_markup=_sponsors_page_keyboard(sponsors, actual_page, total_pages, archived=archived),
     )
 
 
-async def _get_sponsors(session_factory) -> list[Sponsor]:
-    async with session_factory() as session:
-        return list((await session.scalars(select(Sponsor).order_by(Sponsor.title))).all())
-
-
 async def _send_sponsors(message: Message, session_factory) -> None:
-    sponsors = await _get_sponsors(session_factory)
-    await message.answer(_sponsors_text(sponsors), reply_markup=_sponsors_keyboard(sponsors))
+    sponsors, total_pages = await _get_sponsors_page(session_factory, 0, archived=False)
+    await message.answer(
+        _sponsors_menu_text(0, total_pages, archived=False),
+        reply_markup=_sponsors_page_keyboard(sponsors, 0, total_pages, archived=False),
+    )
 
 
 async def _send_admin_menu(message: Message) -> None:
@@ -602,9 +635,73 @@ async def cancel_scheduled_broadcast_handler(callback: CallbackQuery, session_fa
 
 @admin_router.callback_query(F.data == "admin:sponsors")
 async def list_sponsors(callback: CallbackQuery, session_factory) -> None:
-    sponsors = await _get_sponsors(session_factory)
-    await callback.message.edit_text(_sponsors_text(sponsors), reply_markup=_sponsors_keyboard(sponsors))
+    await _edit_sponsors_page(callback, session_factory, 0, archived=False)
     await callback.answer()
+
+
+@admin_router.callback_query(F.data.regexp(r"^admin:sponsors:page:\d+$"))
+async def sponsors_page(callback: CallbackQuery, session_factory) -> None:
+    await _edit_sponsors_page(callback, session_factory, int(callback.data.rsplit(":", 1)[1]), archived=False)
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.regexp(r"^admin:sponsors:archived:\d+$"))
+async def archived_sponsors_page(callback: CallbackQuery, session_factory) -> None:
+    await _edit_sponsors_page(callback, session_factory, int(callback.data.rsplit(":", 1)[1]), archived=True)
+    await callback.answer()
+
+
+def _sponsor_card_text(sponsor: Sponsor) -> str:
+    lines = [
+        f"{sponsor.title} ({_sponsor_type_label(sponsor)})",
+        f"Статус доступа: {'✅ доступен' if sponsor.bot_has_access else '⚠️ нет доступа'}",
+    ]
+    if sponsor.own_channel:
+        lines.append("· своё")
+    if sponsor.request_mode:
+        lines.append("· заявки")
+    if sponsor.archived_at is not None:
+        lines.append("· в архиве")
+    return "\n".join(lines)
+
+
+def _sponsor_card_keyboard(sponsor: Sponsor) -> InlineKeyboardMarkup:
+    archived = sponsor.archived_at is not None
+    rows = [[
+        InlineKeyboardButton(
+            text=f"{'✅' if sponsor.own_channel else '⬜'} Своё",
+            callback_data=f"admin:sponsor:{sponsor.chat_id}:toggle_own",
+        ),
+        InlineKeyboardButton(
+            text=f"{'✅' if sponsor.request_mode else '⬜'} Заявки",
+            callback_data=f"admin:sponsor:{sponsor.chat_id}:toggle_request_mode",
+        ),
+    ]]
+    rows.append([InlineKeyboardButton(
+        text="♻️ Разархивировать" if archived else "📦 Архивировать",
+        callback_data=f"admin:sponsor:{sponsor.chat_id}:{'unarchive' if archived else 'archive'}",
+    )])
+    rows.append([InlineKeyboardButton(
+        text="⬅️ К списку",
+        callback_data="admin:sponsors:archived:0" if archived else "admin:sponsors:page:0",
+    )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _edit_sponsor_card(callback: CallbackQuery, session_factory, chat_id: int) -> bool:
+    async with session_factory() as session:
+        sponsor = await session.get(Sponsor, chat_id)
+    if sponsor is None:
+        await callback.answer("Спонсор не найден.", show_alert=True)
+        return False
+    await callback.message.edit_text(_sponsor_card_text(sponsor), reply_markup=_sponsor_card_keyboard(sponsor))
+    return True
+
+
+@admin_router.callback_query(F.data.regexp(r"^admin:sponsor:-?\d+:card$"))
+async def sponsor_card(callback: CallbackQuery, session_factory) -> None:
+    if await _edit_sponsor_card(callback, session_factory, int(callback.data.split(":")[2])):
+        await callback.answer()
 
 
 @admin_router.callback_query(F.data.regexp(r"^admin:sponsor:-?\d+:toggle_own$"))
@@ -617,12 +714,8 @@ async def toggle_sponsor_own_channel(callback: CallbackQuery, session_factory) -
             .values(own_channel=~Sponsor.own_channel)
         )
         await session.commit()
-
-    sponsors = await _get_sponsors(session_factory)
-    await callback.message.edit_text(
-        _sponsors_text(sponsors), reply_markup=_sponsors_keyboard(sponsors)
-    )
-    await callback.answer()
+    if await _edit_sponsor_card(callback, session_factory, chat_id):
+        await callback.answer()
 
 
 @admin_router.callback_query(F.data.regexp(r"^admin:sponsor:-?\d+:toggle_request_mode$"))
@@ -635,11 +728,31 @@ async def toggle_sponsor_request_mode(callback: CallbackQuery, session_factory) 
             .values(request_mode=~Sponsor.request_mode)
         )
         await session.commit()
+    if await _edit_sponsor_card(callback, session_factory, chat_id):
+        await callback.answer()
 
-    sponsors = await _get_sponsors(session_factory)
-    await callback.message.edit_text(
-        _sponsors_text(sponsors), reply_markup=_sponsors_keyboard(sponsors)
-    )
+
+@admin_router.callback_query(F.data.regexp(r"^admin:sponsor:-?\d+:archive$"))
+async def archive_sponsor_handler(callback: CallbackQuery, session_factory) -> None:
+    chat_id = int(callback.data.split(":")[2])
+    async with session_factory() as session:
+        sponsor = await archive_sponsor(session, chat_id)
+    if sponsor is None:
+        await callback.answer("Спонсор не найден.", show_alert=True)
+        return
+    await callback.message.edit_text(_sponsor_card_text(sponsor), reply_markup=_sponsor_card_keyboard(sponsor))
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.regexp(r"^admin:sponsor:-?\d+:unarchive$"))
+async def unarchive_sponsor_handler(callback: CallbackQuery, session_factory) -> None:
+    chat_id = int(callback.data.split(":")[2])
+    async with session_factory() as session:
+        sponsor = await unarchive_sponsor(session, chat_id)
+    if sponsor is None:
+        await callback.answer("Спонсор не найден.", show_alert=True)
+        return
+    await callback.message.edit_text(_sponsor_card_text(sponsor), reply_markup=_sponsor_card_keyboard(sponsor))
     await callback.answer()
 
 
@@ -907,7 +1020,8 @@ async def list_campaigns(callback: CallbackQuery, session_factory) -> None:
 
 @admin_router.callback_query(F.data == "admin:campaign:add")
 async def add_campaign(callback: CallbackQuery, state: FSMContext, session_factory) -> None:
-    sponsors = await _get_sponsors(session_factory)
+    async with session_factory() as session:
+        sponsors = await list_sponsors_service(session, archived=False)
     if not sponsors:
         await callback.answer("Сначала добавь хотя бы одного спонсора.", show_alert=True)
         return

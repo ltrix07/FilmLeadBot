@@ -155,12 +155,19 @@ class SubscriptionAccessService:
             if memberships.get(sponsor_chat_id, False)
         ]
         passed = not missing_sponsors
-        newly_completed_campaigns: list[Campaign] = []
+        subscribed_campaign_ids = [
+            campaign.id
+            for campaign in campaigns
+            if memberships.get(campaign.sponsor.chat_id) is True
+        ]
+        newly_completed_campaigns = []
+
+        if subscribed_campaign_ids:
+            newly_completed_campaigns = await _record_campaign_completions(
+                session, subscribed_campaign_ids, telegram_id
+            )
 
         if passed:
-            newly_completed_campaigns = await _record_campaign_completions(
-                session, [campaign.id for campaign in campaigns], telegram_id
-            )
             await session.execute(
                 update(ReferralEvent)
                 .where(
@@ -171,7 +178,7 @@ class SubscriptionAccessService:
             )
 
         # Error-state changes must persist even when another sponsor is missing.
-        if passed or errored_campaigns:
+        if subscribed_campaign_ids or passed or errored_campaigns:
             await session.commit()
 
         return AccessResult(
