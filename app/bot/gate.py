@@ -21,11 +21,11 @@ gate_router = Router(name="gate")
 
 def render_gate_text(missing: list[Sponsor]) -> str:
     names = "\n".join(f"• {sponsor.title}" for sponsor in missing)
-    return f"Чтобы пользоваться ботом, подпишись на все каналы ниже:\n{names}"
+    return f"🤖 Чтобы бот выдал название по найденному коду - подпишитесь на все каналы из списка ниже:\n{names}"
 
 
 def render_menu_text(result: AccessResult) -> str:
-    lines = ["Доступ открыт. Отправь код фильма, чтобы получить название."]
+    lines = ["🍏 Доступ открыт. Чтобы получить название - отправьте найденный Вами код."]
     if result.is_partner:
         lines.extend(get_partner_menu_extra_lines())
     return "\n".join(lines)

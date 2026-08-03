@@ -17,9 +17,12 @@ from app.db.models import (
     CampaignCompletion,
     CampaignStatus,
     ReferralEvent,
+    ReferralSubscription,
     Sponsor,
+    SponsorJoinRequest,
 )
 from app.services.partners import is_active_partner
+from app.services.settings import get_subscription_price
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +74,30 @@ class SubscriptionAccessService:
             memberships = {}
             sponsors = {campaign.sponsor.chat_id: campaign.sponsor for campaign in campaigns}
             inaccessible_sponsor_ids: set[int] = set()
+            request_mode_sponsor_ids = {
+                sponsor_chat_id
+                for sponsor_chat_id, sponsor in sponsors.items()
+                if sponsor.request_mode
+            }
+            if request_mode_sponsor_ids:
+                requested_ids = set(
+                    await session.scalars(
+                        select(SponsorJoinRequest.sponsor_chat_id).where(
+                            SponsorJoinRequest.user_telegram_id == telegram_id,
+                            SponsorJoinRequest.sponsor_chat_id.in_(request_mode_sponsor_ids),
+                        )
+                    )
+                )
+                memberships.update(
+                    {
+                        sponsor_chat_id: sponsor_chat_id in requested_ids
+                        for sponsor_chat_id in request_mode_sponsor_ids
+                    }
+                )
+
             for sponsor_chat_id, sponsor in sponsors.items():
+                if sponsor.request_mode:
+                    continue
                 try:
                     member = await bot.get_chat_member(sponsor_chat_id, telegram_id)
                 except (TelegramBadRequest, TelegramForbiddenError) as error:
@@ -163,6 +189,12 @@ async def _record_campaign_completions(
 ) -> list[Campaign]:
     """Record first-time completions and reserve campaign capacity atomically."""
     completed: list[Campaign] = []
+    referrer_telegram_id = await session.scalar(
+        select(ReferralEvent.referrer_telegram_id).where(
+            ReferralEvent.referred_user_telegram_id == telegram_id
+        )
+    )
+    subscription_price = await get_subscription_price(session)
     for campaign_id in campaign_ids:
         inserted = await session.execute(
             insert(CampaignCompletion)
@@ -195,6 +227,20 @@ async def _record_campaign_completions(
                 )
             )
             continue
+
+        if referrer_telegram_id is not None:
+            await session.execute(
+                insert(ReferralSubscription)
+                .values(
+                    campaign_id=campaign_id,
+                    referrer_telegram_id=referrer_telegram_id,
+                    referred_user_telegram_id=telegram_id,
+                    price_at_credit=subscription_price,
+                )
+                .on_conflict_do_nothing(
+                    index_elements=("campaign_id", "referred_user_telegram_id")
+                )
+            )
 
         if row.counter >= row.limit_current:
             campaign = await session.scalar(

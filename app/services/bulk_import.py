@@ -196,6 +196,7 @@ def build_template_xlsx() -> bytes:
     for cell in worksheet[1]:
         cell.font = Font(bold=True)
     worksheet.append(["upload", "00123", "Пример названия"])
+    worksheet.append(["delete", "00050", ""])
     for cell in worksheet["B"]:
         cell.number_format = "@"
     output = io.BytesIO()

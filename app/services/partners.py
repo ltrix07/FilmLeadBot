@@ -5,7 +5,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import ReferralEvent, ReferralPartner, User
+from app.db.models import Campaign, ReferralEvent, ReferralPartner, ReferralSubscription, Sponsor, User
 from app.services.admins import get_admin_id
 
 
@@ -20,21 +20,31 @@ def get_partner_menu_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🔗 Моя реф. ссылка", callback_data="partner:link")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="partner:stats")],
         [InlineKeyboardButton(text="📄 Скачать коды/названия", callback_data="partner:codes_export")],
+        [InlineKeyboardButton(text="💰 Баланс", callback_data="partner:balance")],
     ])
 
 
 async def get_partner_stats(session: AsyncSession, telegram_id: int) -> tuple[int, int]:
-    """Return referrals started and referrals confirmed for a partner."""
+    """Return referrals started and campaign credits earned by a partner."""
     base_filter = ReferralEvent.referrer_telegram_id == telegram_id
     started = await session.scalar(
         select(func.count()).select_from(ReferralEvent).where(base_filter)
     )
     confirmed = await session.scalar(
-        select(func.count()).select_from(ReferralEvent).where(
-            base_filter, ReferralEvent.confirmed_at.is_not(None)
+        select(func.count())
+        .select_from(ReferralSubscription)
+        .join(Campaign, Campaign.id == ReferralSubscription.campaign_id)
+        .join(Sponsor, Sponsor.chat_id == Campaign.sponsor_chat_id)
+        .where(
+            ReferralSubscription.referrer_telegram_id == telegram_id,
+            Sponsor.own_channel.is_(False),
         )
     )
     return int(started or 0), int(confirmed or 0)
+
+
+def format_partner_stats_text(started: int, confirmed: int) -> str:
+    return f"Приведено пользователей: {started}\nПрошли обязательные подписки: {confirmed}"
 
 
 async def is_active_partner(session: AsyncSession, telegram_id: int) -> bool:
@@ -100,10 +110,32 @@ async def revoke_partner(session: AsyncSession, telegram_id: int) -> ReferralPar
     return partner
 
 
-async def list_partners(session: AsyncSession) -> list[ReferralPartner]:
+def format_user_label(telegram_id: int, user: User | None) -> str:
+    """Return the most useful available human-readable partner identifier."""
+    if user is not None and user.username:
+        return f"@{user.username}"
+    if user is not None and user.full_name:
+        return f"{user.full_name} (#{telegram_id})"
+    return f"#{telegram_id}"
+
+
+def format_partner_label(partner: ReferralPartner, user: User | None) -> str:
+    return format_user_label(partner.telegram_id, user)
+
+
+async def list_partners(
+    session: AsyncSession, limit: int | None = None, offset: int = 0
+) -> list[ReferralPartner]:
     """Return all referral partners, newest approvals first."""
+    statement = select(ReferralPartner).order_by(ReferralPartner.approved_at.desc()).offset(offset)
+    if limit is not None:
+        statement = statement.limit(limit)
     return list(
-        (await session.scalars(
-            select(ReferralPartner).order_by(ReferralPartner.approved_at.desc())
-        )).all()
+        (await session.scalars(statement)).all()
     )
+
+
+async def count_partners(session: AsyncSession) -> int:
+    """Return the total number of referral partners."""
+    count = await session.scalar(select(func.count()).select_from(ReferralPartner))
+    return int(count or 0)

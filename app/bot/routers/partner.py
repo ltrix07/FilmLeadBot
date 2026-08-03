@@ -8,10 +8,12 @@ from sqlalchemy import select
 from app.db.models import ReferralPartner
 from app.services.movie_codes import build_active_codes_export_xlsx
 from app.services.partners import (
+    format_partner_stats_text,
     get_partner_menu_keyboard,
     get_partner_stats,
     is_active_partner,
 )
+from app.services.partner_balance import get_partner_balance, get_partner_balance_history
 
 
 class PartnerTriggerFilter(Filter):
@@ -59,14 +61,14 @@ async def activate_partner(message: Message, session_factory, bot: Bot) -> None:
             "новым пользователям — каждый, кто перейдёт по ней и пройдёт "
             "обязательные подписки, будет засчитан в твою статистику."
         )
-    await message.answer("Кабинет партнёра.", reply_markup=get_partner_menu_keyboard())
+    await message.answer("Кабинет рефовода.", reply_markup=get_partner_menu_keyboard())
 
 
 @partner_router.callback_query(F.data == "partner:link")
 async def partner_link(callback: CallbackQuery, session_factory, bot: Bot) -> None:
     async with session_factory() as session:
         if not await is_active_partner(session, callback.from_user.id):
-            await callback.answer("Доступно только партнёрам.", show_alert=True)
+            await callback.answer("Доступно только рефоводам.", show_alert=True)
             return
         partner = await session.scalar(
             select(ReferralPartner).where(ReferralPartner.telegram_id == callback.from_user.id)
@@ -83,11 +85,25 @@ async def partner_link(callback: CallbackQuery, session_factory, bot: Bot) -> No
 async def partner_stats(callback: CallbackQuery, session_factory) -> None:
     async with session_factory() as session:
         if not await is_active_partner(session, callback.from_user.id):
-            await callback.answer("Доступно только партнёрам.", show_alert=True)
+            await callback.answer("Доступно только рефоводам.", show_alert=True)
             return
         started, confirmed = await get_partner_stats(session, callback.from_user.id)
     await callback.message.answer(
-        f"Приведено пользователей: {started}\nПрошли обязательные подписки: {confirmed}"
+        format_partner_stats_text(started, confirmed)
+    )
+    await callback.answer()
+
+
+@partner_router.callback_query(F.data == "partner:balance")
+async def partner_balance(callback: CallbackQuery, session_factory) -> None:
+    async with session_factory() as session:
+        if not await is_active_partner(session, callback.from_user.id):
+            await callback.answer("Доступно только рефоводам.", show_alert=True)
+            return
+        balance = await get_partner_balance(session, callback.from_user.id)
+        history = await get_partner_balance_history(session, callback.from_user.id)
+    await callback.message.answer(
+        f"Баланс: {balance:.2f} ₽\n\nИстория (последние 30 дней):\n" + "\n".join(history)
     )
     await callback.answer()
 
@@ -96,7 +112,7 @@ async def partner_stats(callback: CallbackQuery, session_factory) -> None:
 async def partner_codes_export(callback: CallbackQuery, session_factory) -> None:
     async with session_factory() as session:
         if not await is_active_partner(session, callback.from_user.id):
-            await callback.answer("Доступно только партнёрам.", show_alert=True)
+            await callback.answer("Доступно только рефоводам.", show_alert=True)
             return
         content = await build_active_codes_export_xlsx(session)
     await callback.message.answer_document(BufferedInputFile(content, filename="codes.xlsx"))

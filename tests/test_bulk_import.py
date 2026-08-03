@@ -1,7 +1,7 @@
 import io
 
 import pytest
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from sqlalchemy import select
 
 from app.db.models import Admin, MovieCode, MovieCodeAudit, MovieCodeStatus
@@ -9,6 +9,7 @@ from app.services.bulk_import import (
     ParsedRow,
     apply_import_plan,
     build_import_plan,
+    build_template_xlsx,
     parse_csv,
     parse_xlsx,
 )
@@ -41,6 +42,14 @@ def test_parse_xlsx_marks_numeric_code_as_risky():
     rows = parse_xlsx(content.getvalue())
     assert rows[0].code == "123"
     assert rows[0].code_looks_numeric_risk is True
+
+
+def test_template_xlsx_contains_delete_example():
+    workbook = load_workbook(io.BytesIO(build_template_xlsx()), data_only=True)
+    try:
+        assert any(row[0] == "delete" for row in workbook.active.iter_rows(min_row=2, values_only=True))
+    finally:
+        workbook.close()
 
 
 @pytest.mark.asyncio

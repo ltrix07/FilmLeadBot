@@ -6,8 +6,23 @@ from sqlalchemy import func, select
 from types import SimpleNamespace
 
 from app.bot.routers.partner import PartnerTriggerFilter
-from app.db.models import Admin, ReferralEvent, ReferralPartner, User
-from app.services.partners import approve_partner, get_partner_stats, revoke_partner
+from app.db.models import (
+    Admin,
+    Campaign,
+    CampaignStatus,
+    ReferralEvent,
+    ReferralPartner,
+    ReferralSubscription,
+    Sponsor,
+    SponsorType,
+    User,
+)
+from app.services.partners import (
+    approve_partner,
+    format_partner_label,
+    get_partner_stats,
+    revoke_partner,
+)
 
 
 async def _admin_and_user(session_factory, user_id: int = 100, admin_id: int = 800) -> None:
@@ -63,13 +78,14 @@ async def test_revoke_partner_marks_existing_and_ignores_missing(session_factory
 
 
 @pytest.mark.asyncio
-async def test_partner_stats_counts_started_and_confirmed_referrals(session_factory):
+async def test_partner_stats_counts_started_and_campaign_credits(session_factory):
     await _admin_and_user(session_factory)
     async with session_factory() as session:
         await approve_partner(session, 100, 800)
         session.add_all([User(telegram_id=user_id) for user_id in (101, 102, 103)])
         await session.flush()
         session.add_all([
+            Sponsor(chat_id=-100, title="Sponsor", type=SponsorType.CHANNEL),
             ReferralEvent(referred_user_telegram_id=101, referrer_telegram_id=100),
             ReferralEvent(
                 referred_user_telegram_id=102, referrer_telegram_id=100,
@@ -80,8 +96,46 @@ async def test_partner_stats_counts_started_and_confirmed_referrals(session_fact
                 confirmed_at=datetime.now(timezone.utc),
             ),
         ])
+        await session.flush()
+        campaign = Campaign(
+            sponsor_chat_id=-100, limit_original=10, limit_current=10, status=CampaignStatus.ACTIVE
+        )
+        session.add(campaign)
+        await session.flush()
+        session.add_all([
+            ReferralSubscription(campaign_id=campaign.id, referrer_telegram_id=100, referred_user_telegram_id=101),
+            ReferralSubscription(campaign_id=campaign.id, referrer_telegram_id=100, referred_user_telegram_id=102),
+        ])
         await session.commit()
         assert await get_partner_stats(session, 100) == (3, 2)
+
+
+@pytest.mark.asyncio
+async def test_partner_stats_excludes_own_channel_credits(session_factory):
+    async with session_factory() as session:
+        session.add_all([User(telegram_id=user_id) for user_id in (100, 101, 102)])
+        await session.flush()
+        session.add_all([
+            Sponsor(chat_id=-110, title="Own", type=SponsorType.CHANNEL, own_channel=True),
+            Sponsor(chat_id=-111, title="Partner", type=SponsorType.CHANNEL),
+            ReferralEvent(referred_user_telegram_id=101, referrer_telegram_id=100),
+            ReferralEvent(referred_user_telegram_id=102, referrer_telegram_id=100),
+        ])
+        await session.flush()
+        own_campaign = Campaign(
+            sponsor_chat_id=-110, limit_original=10, limit_current=10, status=CampaignStatus.ACTIVE
+        )
+        partner_campaign = Campaign(
+            sponsor_chat_id=-111, limit_original=10, limit_current=10, status=CampaignStatus.ACTIVE
+        )
+        session.add_all([own_campaign, partner_campaign])
+        await session.flush()
+        session.add_all([
+            ReferralSubscription(campaign_id=own_campaign.id, referrer_telegram_id=100, referred_user_telegram_id=101),
+            ReferralSubscription(campaign_id=partner_campaign.id, referrer_telegram_id=100, referred_user_telegram_id=102),
+        ])
+        await session.commit()
+        assert await get_partner_stats(session, 100) == (2, 1)
 
 
 @pytest.mark.asyncio
@@ -99,3 +153,18 @@ async def test_partner_trigger_filter_matches_only_non_revoked_partners(session_
     async with session_factory() as session:
         await revoke_partner(session, 100)
     assert await trigger(message, session_factory) is False
+
+
+@pytest.mark.parametrize(
+    ("username", "full_name", "expected"),
+    [
+        ("partner", "Partner Name", "@partner"),
+        (None, "Partner Name", "Partner Name (#100)"),
+        (None, None, "#100"),
+    ],
+)
+def test_format_partner_label_prefers_username_then_full_name(username, full_name, expected):
+    partner = ReferralPartner(telegram_id=100, referral_code="code", approved_by_admin_id=1)
+    user = User(telegram_id=100, username=username, full_name=full_name)
+
+    assert format_partner_label(partner, user) == expected

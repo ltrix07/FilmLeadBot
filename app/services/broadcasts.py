@@ -27,17 +27,37 @@ async def create_broadcast(
     source_chat_id: int,
     source_message_id: int,
     preview: str,
+    *,
+    status: BroadcastStatus = BroadcastStatus.SENDING,
+    scheduled_at: datetime | None = None,
 ) -> Broadcast:
     broadcast = Broadcast(
         admin_id=await get_admin_id(session, admin_telegram_id),
         content=preview,
         source_chat_id=source_chat_id,
         source_message_id=source_message_id,
-        status=BroadcastStatus.SENDING,
+        status=status,
+        scheduled_at=scheduled_at,
     )
     session.add(broadcast)
     await session.commit()
     await session.refresh(broadcast)
+    return broadcast
+
+
+async def cancel_scheduled_broadcast(
+    session: AsyncSession, broadcast_id: int
+) -> Broadcast | None:
+    """Cancel a broadcast only while it is still waiting to be launched."""
+    broadcast = await session.scalar(
+        update(Broadcast)
+        .where(Broadcast.id == broadcast_id, Broadcast.status == BroadcastStatus.SCHEDULED)
+        .values(status=BroadcastStatus.FAILED, completed_at=datetime.now(timezone.utc))
+        .returning(Broadcast)
+    )
+    if broadcast is None:
+        return None
+    await session.commit()
     return broadcast
 
 
@@ -72,7 +92,7 @@ async def run_broadcast(
     source_chat_id: int,
     source_message_id: int,
     recipients: list[int],
-    notify_telegram_id: int,
+    notify_telegram_id: int | None,
 ) -> None:
     sent = 0
     failed = 0
@@ -111,7 +131,8 @@ async def run_broadcast(
         await mark_users_blocked(session, newly_blocked)
     async with session_factory() as session:
         await mark_broadcast_completed(session, broadcast_id, sent, failed)
-    await bot.send_message(
-        notify_telegram_id,
-        f"Рассылка завершена. Отправлено: {sent}. Не доставлено: {failed}.",
-    )
+    if notify_telegram_id is not None:
+        await bot.send_message(
+            notify_telegram_id,
+            f"Рассылка завершена. Отправлено: {sent}. Не доставлено: {failed}.",
+        )

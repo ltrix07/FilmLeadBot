@@ -8,8 +8,9 @@ from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramFor
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import joinedload
 
-from app.db.models import Campaign, CampaignStatus, Sponsor
+from app.db.models import Admin, Broadcast, BroadcastStatus, Campaign, CampaignStatus, Sponsor
 from app.services.admins import bot_status_allows_access
+from app.services.broadcasts import get_broadcast_recipients, run_broadcast
 from app.services.notifications import format_campaign_error, notify_admins
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,61 @@ async def launch_scheduled_campaigns(bot: Bot, session_factory) -> None:
             f"Автоматически запущено по расписанию кампаний: {len(campaigns)}. "
             f"Сейчас одновременно активны {active_count} кампаний — это может снижать "
             "конверсию пользователей.",
+        )
+
+
+async def launch_scheduled_broadcasts(bot: Bot, session_factory) -> None:
+    """Send broadcasts whose scheduled time has arrived."""
+    now = datetime.now(timezone.utc)
+    async with session_factory() as session:
+        broadcast_ids = list(
+            (await session.scalars(
+                select(Broadcast.id).where(
+                    Broadcast.status == BroadcastStatus.SCHEDULED,
+                    Broadcast.scheduled_at <= now,
+                )
+            )).all()
+        )
+
+        launches: list[tuple[Broadcast, list[int], int | None]] = []
+        for broadcast_id in broadcast_ids:
+            recipients = await get_broadcast_recipients(session)
+            if not recipients:
+                await session.execute(
+                    update(Broadcast)
+                    .where(Broadcast.id == broadcast_id, Broadcast.status == BroadcastStatus.SCHEDULED)
+                    .values(
+                        status=BroadcastStatus.COMPLETED,
+                        completed_at=now,
+                        sent_count=0,
+                        failed_count=0,
+                    )
+                )
+                continue
+
+            broadcast = await session.scalar(
+                update(Broadcast)
+                .where(Broadcast.id == broadcast_id, Broadcast.status == BroadcastStatus.SCHEDULED)
+                .values(status=BroadcastStatus.SENDING)
+                .returning(Broadcast)
+            )
+            if broadcast is None:
+                continue
+            notify_telegram_id = await session.scalar(
+                select(Admin.telegram_id).where(Admin.id == broadcast.admin_id)
+            )
+            launches.append((broadcast, recipients, notify_telegram_id))
+        await session.commit()
+
+    for broadcast, recipients, notify_telegram_id in launches:
+        await run_broadcast(
+            bot,
+            session_factory,
+            broadcast.id,
+            broadcast.source_chat_id,
+            broadcast.source_message_id,
+            recipients,
+            notify_telegram_id,
         )
 
 

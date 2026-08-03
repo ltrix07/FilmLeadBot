@@ -9,6 +9,7 @@ from app.db.base import Base
 
 class BroadcastStatus(str, Enum):
     DRAFT = "draft"
+    SCHEDULED = "scheduled"
     SENDING = "sending"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -28,4 +29,5 @@ class Broadcast(Base):
     sent_count: Mapped[int] = mapped_column(Integer, default=0)
     failed_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -4,6 +4,7 @@ from sqlalchemy import func, select
 
 from app.db.models import Admin, MovieCode, MovieCodeAudit, MovieCodeStatus
 from app.services.movie_codes import (
+    build_all_codes_export_xlsx,
     build_active_codes_export_xlsx,
     create_code,
     deactivate_code,
@@ -100,5 +101,27 @@ async def test_active_codes_export_includes_only_active_codes_and_preserves_text
     worksheet = workbook.active
     rows = list(worksheet.iter_rows(values_only=True))
     assert rows == [("code", "title"), ("00042", "Leading zero"), ("123", "Active")]
+    assert worksheet["A2"].number_format == "@"
+    workbook.close()
+
+
+@pytest.mark.asyncio
+async def test_all_codes_export_includes_active_and_inactive_codes_with_status(session_factory):
+    await _admin(session_factory)
+    async with session_factory() as session:
+        await create_code(session, "00042", "Leading zero", 800)
+        await create_code(session, "inactive", "Hidden", 800)
+        await deactivate_code(session, "inactive", 800)
+        content = await build_all_codes_export_xlsx(session)
+
+    import io
+    workbook = load_workbook(io.BytesIO(content), data_only=True)
+    worksheet = workbook.active
+    rows = list(worksheet.iter_rows(values_only=True))
+    assert rows == [
+        ("code", "title", "status"),
+        ("00042", "Leading zero", "active"),
+        ("inactive", "Hidden", "inactive"),
+    ]
     assert worksheet["A2"].number_format == "@"
     workbook.close()
