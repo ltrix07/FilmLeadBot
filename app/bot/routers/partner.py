@@ -15,11 +15,25 @@ from app.db.models import ReferralPartner
 from app.services.movie_codes import build_active_codes_export_xlsx
 from app.services.partners import (
     format_partner_self_stats_text,
+    get_partner_cabinet_text,
     get_partner_menu_keyboard,
     get_partner_stats,
     is_active_partner,
 )
 from app.services.partner_balance import get_partner_balance, get_partner_balance_history
+
+
+WELCOME_HANDSHAKE_EMOJI_ID = "5253700530152165989"
+
+PARTNER_TRIGGER_WORDS = {
+    "партнер",
+    "партнёр",
+    "партнерка",
+    "партнёрка",
+    "рефка",
+    "рефералка",
+    "/partner",
+}
 
 
 class PartnerTriggerFilter(Filter):
@@ -28,15 +42,7 @@ class PartnerTriggerFilter(Filter):
     async def __call__(self, message: Message, session_factory) -> bool:
         if message.text is None:
             return False
-        if message.text.strip().casefold() not in {
-            "партнер",
-            "партнёр",
-            "партнерка",
-            "партнёрка",
-            "рефка",
-            "рефералка",
-            "/partner",
-        }:
+        if message.text.strip().casefold() not in PARTNER_TRIGGER_WORDS:
             return False
         async with session_factory() as session:
             partner = await session.scalar(
@@ -48,12 +54,32 @@ class PartnerTriggerFilter(Filter):
         return partner is not None
 
 
+class PartnerTriggerWordFilter(Filter):
+    """Match the trigger word regardless of partner status.
+
+    Registered after ``partner_router`` so it only ever sees messages from
+    users the trigger filter above already rejected (non-partners).
+    """
+
+    async def __call__(self, message: Message) -> bool:
+        if message.text is None:
+            return False
+        return message.text.strip().casefold() in PARTNER_TRIGGER_WORDS
+
+
 partner_router = Router(name="partner")
 partner_router.message.filter(PartnerTriggerFilter())
 
+partner_recruitment_router = Router(name="partner_recruitment")
+partner_recruitment_router.message.filter(PartnerTriggerWordFilter())
 
-def _partner_cabinet_text() -> str:
-    return "<b>Вам доступен кабинет партнера - используйте кнопки ниже.</b>"
+
+@partner_recruitment_router.message()
+async def prompt_partner_recruitment(message: Message) -> None:
+    await message.answer(
+        "⭐️ <b>Чтобы стать нашим партнером - напишите @Anatoliy_Here</b>",
+        parse_mode="HTML",
+    )
 
 
 def _partner_back_keyboard() -> InlineKeyboardMarkup:
@@ -81,13 +107,14 @@ async def activate_partner(message: Message, session_factory, bot: Bot) -> None:
 
     if first_activation:
         await message.answer(
-            "<b>Добро пожаловать в реферальную программу! Отправляйте свою ссылку "
-            "новым пользователям — каждый, кто перейдёт по ней и пройдёт "
-            "обязательные подписки, будет засчитан в Вашу статистику.</b>",
+            "<b>Добро пожаловать в партнерскую программу! "
+            f'<tg-emoji emoji-id="{WELCOME_HANDSHAKE_EMOJI_ID}">🤝</tg-emoji></b>\n\n'
+            "Набирайте как можно большее количество рефералов. Вы будете получать "
+            "вознаграждение - за каждые подписки, приглашенных Вами пользователей.",
             parse_mode="HTML",
         )
     await message.answer(
-        _partner_cabinet_text(),
+        get_partner_cabinet_text(),
         reply_markup=get_partner_menu_keyboard(),
         parse_mode="HTML",
     )
@@ -104,8 +131,7 @@ async def partner_link(callback: CallbackQuery, session_factory, bot: Bot) -> No
         )
     username = (await bot.get_me()).username
     await callback.message.edit_text(
-        f"Ваша реферальная ссылка:\nhttps://t.me/{username}?start=ref_{partner.referral_code}\n\n"
-        "Отправляйте её новым пользователям.",
+        f"Ваша реферальная ссылка:\nhttps://t.me/{username}?start=ref_{partner.referral_code}",
         reply_markup=_partner_back_keyboard(),
     )
     await callback.answer()
@@ -149,7 +175,7 @@ async def partner_menu(callback: CallbackQuery, session_factory) -> None:
             await callback.answer("Доступно только рефоводам.", show_alert=True)
             return
     await callback.message.edit_text(
-        _partner_cabinet_text(),
+        get_partner_cabinet_text(),
         reply_markup=get_partner_menu_keyboard(),
         parse_mode="HTML",
     )

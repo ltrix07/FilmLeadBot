@@ -25,7 +25,7 @@ from app.services.notifications import (
     notify_admins,
 )
 from app.services.admins import add_admin
-from app.services.partners import approve_partner, get_partner_menu_keyboard
+from app.services.partners import approve_partner, get_partner_cabinet_text, get_partner_menu_keyboard
 from app.services.subscription import SubscriptionAccessService
 from app.services.settings import get_welcome_message
 
@@ -162,8 +162,13 @@ async def cmd_start(
 
     await _send_welcome_message(message, bot, session_factory, settings)
     if result.passed:
-        keyboard = get_partner_menu_keyboard() if result.is_partner else None
-        await message.answer(render_menu_text(result), reply_markup=keyboard)
+        await message.answer(render_menu_text(result))
+        if result.is_partner:
+            await message.answer(
+                get_partner_cabinet_text(),
+                reply_markup=get_partner_menu_keyboard(),
+                parse_mode="HTML",
+            )
     else:
         await message.answer(
             render_gate_text(result.missing_sponsors),

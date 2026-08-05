@@ -6,7 +6,13 @@ from aiogram.types import Message
 from app.bot.fallback import fallback_router
 from app.bot.gate import SubscriptionGateMiddleware, gate_router
 from app.bot.chat_join_requests import chat_join_requests_router
-from app.bot.routers import admin_router, menu_router, partner_router, start_router
+from app.bot.routers import (
+    admin_router,
+    menu_router,
+    partner_recruitment_router,
+    partner_router,
+    start_router,
+)
 from app.services.subscription import SubscriptionAccessService
 
 
@@ -30,6 +36,7 @@ def create_dispatcher(subscription_service: SubscriptionAccessService) -> Dispat
     dispatcher.include_router(start_router)
     dispatcher.include_router(gate_router)
     dispatcher.include_router(partner_router)
+    dispatcher.include_router(partner_recruitment_router)
     menu_router.message.middleware(SubscriptionGateMiddleware(subscription_service))
     menu_router.callback_query.middleware(SubscriptionGateMiddleware(subscription_service))
     dispatcher.include_router(menu_router)

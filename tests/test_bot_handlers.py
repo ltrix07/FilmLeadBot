@@ -73,12 +73,14 @@ from app.bot.routers.admin import (
 from app.bot.filters import IsAdmin
 from app.bot.routers.menu import handle_movie_code
 from app.bot.routers.partner import (
+    PartnerTriggerWordFilter,
     activate_partner,
     partner_balance,
     partner_codes_export,
     partner_link,
     partner_menu,
     partner_stats,
+    prompt_partner_recruitment,
 )
 from app.bot.routers.start import _ensure_user_and_referral, _send_welcome_message, cmd_start
 from app.db.models import (
@@ -377,6 +379,54 @@ async def test_start_renders_failed_gate_as_html(session_factory):
 
 
 @pytest.mark.asyncio
+async def test_start_sends_partner_cabinet_as_separate_message(session_factory):
+    service = SimpleNamespace(evaluate_user_access=AsyncMock(return_value=AccessResult(
+        passed=True, is_partner=True, subscribed_sponsors=[], missing_sponsors=[],
+        newly_completed_campaigns=[], errored_campaigns=[],
+    )))
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=100, username="user", full_name="User"), answer=AsyncMock()
+    )
+    bot = SimpleNamespace(copy_message=AsyncMock())
+
+    await cmd_start(
+        message, SimpleNamespace(args=None), session_factory, service, bot,
+        SimpleNamespace(welcome_message="Welcome"),
+    )
+
+    calls = message.answer.await_args_list
+    assert calls[-2].args[0] == (
+        "🍏 Доступ открыт. Чтобы получить название - отправьте найденный Вами код."
+    )
+    assert "reply_markup" not in calls[-2].kwargs
+    assert calls[-1].args[0] == "<b>Вам доступен кабинет партнера - используйте кнопки ниже.</b>"
+    assert calls[-1].kwargs["parse_mode"] == "HTML"
+    assert calls[-1].kwargs["reply_markup"] is not None
+
+
+@pytest.mark.asyncio
+async def test_check_subscription_sends_partner_cabinet_as_separate_message(session_factory):
+    service = SimpleNamespace(evaluate_user_access=AsyncMock(return_value=AccessResult(
+        passed=True, is_partner=True, subscribed_sponsors=[], missing_sponsors=[],
+        newly_completed_campaigns=[], errored_campaigns=[],
+    )))
+    message = SimpleNamespace(edit_text=AsyncMock(), answer=AsyncMock())
+    callback = SimpleNamespace(from_user=SimpleNamespace(id=100), message=message, answer=AsyncMock())
+
+    await check_subscription(callback, session_factory, service, SimpleNamespace())
+
+    assert message.edit_text.await_args.args[0] == (
+        "🍏 Доступ открыт. Чтобы получить название - отправьте найденный Вами код."
+    )
+    assert "reply_markup" not in message.edit_text.await_args.kwargs
+    assert message.answer.await_args.args[0] == (
+        "<b>Вам доступен кабинет партнера - используйте кнопки ниже.</b>"
+    )
+    assert message.answer.await_args.kwargs["parse_mode"] == "HTML"
+    assert message.answer.await_args.kwargs["reply_markup"] is not None
+
+
+@pytest.mark.asyncio
 async def test_activate_partner_sends_welcome_only_on_first_activation(session_factory):
     await _create_partner(session_factory, telegram_id=100)
     first_message = SimpleNamespace(from_user=SimpleNamespace(id=100), answer=AsyncMock())
@@ -384,15 +434,41 @@ async def test_activate_partner_sends_welcome_only_on_first_activation(session_f
     await activate_partner(first_message, session_factory, SimpleNamespace())
 
     first_calls = first_message.answer.await_args_list
-    assert "Добро пожаловать в реферальную программу" in first_calls[0].args[0]
+    assert "Добро пожаловать в партнерскую программу" in first_calls[0].args[0]
+    assert '<tg-emoji emoji-id="5253700530152165989">🤝</tg-emoji>' in first_calls[0].args[0]
     assert first_calls[0].kwargs["parse_mode"] == "HTML"
-    assert "Ваш кабинет партнера" in first_calls[1].args[0]
+    assert "Вам доступен кабинет партнера" in first_calls[1].args[0]
     assert first_calls[1].kwargs["parse_mode"] == "HTML"
 
     repeated_message = SimpleNamespace(from_user=SimpleNamespace(id=100), answer=AsyncMock())
     await activate_partner(repeated_message, session_factory, SimpleNamespace())
     repeated_message.answer.assert_awaited_once()
-    assert "Ваш кабинет партнера" in repeated_message.answer.await_args.args[0]
+    assert "Вам доступен кабинет партнера" in repeated_message.answer.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_prompt_partner_recruitment_replies_with_bold_html() -> None:
+    message = SimpleNamespace(answer=AsyncMock())
+
+    await prompt_partner_recruitment(message)
+
+    assert message.answer.await_args.args[0] == (
+        "⭐️ <b>Чтобы стать нашим партнером - напишите @Anatoliy_Here</b>"
+    )
+    assert message.answer.await_args.kwargs["parse_mode"] == "HTML"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["партнер", "Партнёрка", " рефка "])
+async def test_partner_trigger_word_filter_matches_known_words(text) -> None:
+    message = SimpleNamespace(text=text)
+    assert await PartnerTriggerWordFilter()(message) is True
+
+
+@pytest.mark.asyncio
+async def test_partner_trigger_word_filter_rejects_other_text() -> None:
+    message = SimpleNamespace(text="случайный код")
+    assert await PartnerTriggerWordFilter()(message) is False
 
 
 async def _activate_partner_record(session_factory, telegram_id: int = 100) -> None:
@@ -411,7 +487,7 @@ async def _activate_partner_record(session_factory, telegram_id: int = 100) -> N
         (partner_link, "partner:link", "Ваша реферальная ссылка"),
         (partner_stats, "partner:stats", "Общее количество приведенных"),
         (partner_balance, "partner:balance", "Ваш текущий баланс"),
-        (partner_menu, "partner:menu", "Ваш кабинет партнера"),
+        (partner_menu, "partner:menu", "Вам доступен кабинет партнера"),
     ],
 )
 async def test_partner_cabinet_pages_edit_message_with_back_or_menu_keyboard(
@@ -748,6 +824,24 @@ async def test_private_sponsor_requires_invite_link(session_factory):
     async with session_factory() as session:
         assert await session.get(Sponsor, -555) is None
     await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_known_client_code_sends_title_then_next_request_prompt(session_factory):
+    async with session_factory() as session:
+        session.add(MovieCode(code="123", title="Film", status=MovieCodeStatus.ACTIVE))
+        await session.commit()
+    message = SimpleNamespace(text="123", answer=AsyncMock())
+
+    await handle_movie_code(message, session_factory, SimpleNamespace())
+
+    calls = message.answer.await_args_list
+    assert calls[0].args[0] == "Film"
+    assert calls[1].args[0] == (
+        "Приятного просмотра! Буду ждать - Ваш следующий запрос "
+        '<tg-emoji emoji-id="5334917262207889846">⏳</tg-emoji>.'
+    )
+    assert calls[1].kwargs["parse_mode"] == "HTML"
 
 
 @pytest.mark.asyncio

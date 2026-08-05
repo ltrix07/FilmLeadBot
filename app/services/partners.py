@@ -35,9 +35,9 @@ async def queue_pending_partner_grant(
     return grant
 
 
-def get_partner_menu_extra_lines() -> list[str]:
-    """Extra menu lines for an active partner's cabinet."""
-    return ["Доступен кабинет партнёра — используй кнопки ниже."]
+def get_partner_cabinet_text() -> str:
+    """Message announcing that the partner cabinet controls are available."""
+    return "<b>Вам доступен кабинет партнера - используйте кнопки ниже.</b>"
 
 
 def get_partner_menu_keyboard() -> InlineKeyboardMarkup:

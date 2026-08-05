@@ -8,7 +8,7 @@ from aiogram.types import CallbackQuery, Message
 
 from app.bot.keyboards import build_gate_keyboard
 from app.db.models import Sponsor
-from app.services.partners import get_partner_menu_extra_lines, get_partner_menu_keyboard
+from app.services.partners import get_partner_cabinet_text, get_partner_menu_keyboard
 from app.services.notifications import (
     format_campaign_completed,
     format_campaign_error,
@@ -24,10 +24,7 @@ def render_gate_text(missing: list[Sponsor]) -> str:
 
 
 def render_menu_text(result: AccessResult) -> str:
-    lines = ["🍏 Доступ открыт. Чтобы получить название - отправьте найденный Вами код."]
-    if result.is_partner:
-        lines.extend(get_partner_menu_extra_lines())
-    return "\n".join(lines)
+    return "🍏 Доступ открыт. Чтобы получить название - отправьте найденный Вами код."
 
 
 class SubscriptionGateMiddleware(BaseMiddleware):
@@ -88,8 +85,13 @@ async def check_subscription(callback: CallbackQuery, session_factory, subscript
                 if sponsor is not None:
                     await notify_admins(bot, session_factory, format_campaign_error(campaign, sponsor))
     if result.passed:
-        keyboard = get_partner_menu_keyboard() if result.is_partner else None
-        await callback.message.edit_text(render_menu_text(result), reply_markup=keyboard)
+        await callback.message.edit_text(render_menu_text(result))
+        if result.is_partner:
+            await callback.message.answer(
+                get_partner_cabinet_text(),
+                reply_markup=get_partner_menu_keyboard(),
+                parse_mode="HTML",
+            )
     else:
         await callback.message.edit_text(
             render_gate_text(result.missing_sponsors),

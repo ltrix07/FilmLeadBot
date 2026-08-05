@@ -7,6 +7,8 @@ from app.services.subscription import AccessResult
 
 menu_router = Router(name="menu")
 
+NEXT_REQUEST_EMOJI_ID = "5334917262207889846"
+
 
 @menu_router.message(F.text)
 async def handle_movie_code(message: Message, session_factory, access_result: AccessResult) -> None:
@@ -26,3 +28,8 @@ async def handle_movie_code(message: Message, session_factory, access_result: Ac
         )
     else:
         await message.answer(movie.title)
+        await message.answer(
+            "Приятного просмотра! Буду ждать - Ваш следующий запрос "
+            f'<tg-emoji emoji-id="{NEXT_REQUEST_EMOJI_ID}">⏳</tg-emoji>.',
+            parse_mode="HTML",
+        )
