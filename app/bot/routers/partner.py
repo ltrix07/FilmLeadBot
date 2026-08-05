@@ -53,7 +53,7 @@ partner_router.message.filter(PartnerTriggerFilter())
 
 
 def _partner_cabinet_text() -> str:
-    return "<b>Ваш кабинет партнера:\nПо всем вопросам - @Anatoliy_Here</b>"
+    return "<b>Вам доступен кабинет партнера - используйте кнопки ниже.</b>"
 
 
 def _partner_back_keyboard() -> InlineKeyboardMarkup:
