@@ -84,6 +84,7 @@ from app.services.partners import (
     list_partners,
     queue_pending_partner_grant,
     revoke_partner,
+    unrevoke_partner,
 )
 from app.services.settings import (
     get_subscription_price,
@@ -1620,9 +1621,11 @@ def _partner_status(partner: ReferralPartner) -> tuple[str, str]:
     return "⏳", "не активирован"
 
 
-def _partners_menu_text(page: int, total_pages: int, price: Decimal) -> str:
+def _partners_menu_text(page: int, total_pages: int, price: Decimal, *, revoked: bool = False) -> str:
     if total_pages == 0:
-        return f"Рефоводов пока нет.\nЦена подписки: {price:.2f} ₽."
+        return "В архиве пусто." if revoked else f"Рефоводов пока нет.\nЦена подписки: {price:.2f} ₽."
+    if revoked:
+        return f"Архив рефоводов (стр. {page + 1}/{total_pages}):"
     return (
         f"Рефоводы (стр. {page + 1}/{max(total_pages, 1)}) · "
         f"цена подписки: {price:.2f} ₽:"
@@ -1630,15 +1633,15 @@ def _partners_menu_text(page: int, total_pages: int, price: Decimal) -> str:
 
 
 async def _get_partners_page(
-    session_factory, page: int
+    session_factory, page: int, *, revoked: bool = False
 ) -> tuple[list[ReferralPartner], dict[int, User], int, Decimal]:
     async with session_factory() as session:
-        total = await count_partners(session)
+        total = await count_partners(session, revoked=revoked)
         price = await get_subscription_price(session)
         total_pages = ceil(total / _PARTNERS_PER_PAGE)
         page = max(0, min(page, total_pages - 1)) if total_pages else 0
         partners = await list_partners(
-            session, limit=_PARTNERS_PER_PAGE, offset=page * _PARTNERS_PER_PAGE
+            session, revoked=revoked, limit=_PARTNERS_PER_PAGE, offset=page * _PARTNERS_PER_PAGE
         )
         ids = [partner.telegram_id for partner in partners]
         users = [] if not ids else list(await session.scalars(
@@ -1649,15 +1652,15 @@ async def _get_partners_page(
 
 def _partners_page_keyboard(
     partners: list[ReferralPartner], users_by_id: dict[int, User], page: int,
-    total_pages: int, price: Decimal,
+    total_pages: int, price: Decimal, *, revoked: bool = False,
 ) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(
+    rows: list[list[InlineKeyboardButton]] = []
+    if not revoked:
+        rows.append([InlineKeyboardButton(
             text=f"💵 Цена подписки: {price:.2f} ₽ (изменить)",
             callback_data="admin:partners:price",
-        )],
-        [InlineKeyboardButton(text="➕ Добавить рефовода", callback_data="admin:partner:add")],
-    ]
+        )])
+        rows.append([InlineKeyboardButton(text="➕ Добавить рефовода", callback_data="admin:partner:add")])
     for partner in partners:
         emoji, _ = _partner_status(partner)
         rows.append([InlineKeyboardButton(
@@ -1666,25 +1669,32 @@ def _partners_page_keyboard(
         )])
     if total_pages > 1:
         navigation = []
+        prefix = "admin:partners:archived" if revoked else "admin:partners:page"
         if page > 0:
-            navigation.append(InlineKeyboardButton(
-                text="◀️ Пред", callback_data=f"admin:partners:page:{page - 1}"
-            ))
+            navigation.append(InlineKeyboardButton(text="◀️ Пред", callback_data=f"{prefix}:{page - 1}"))
         if page + 1 < total_pages:
-            navigation.append(InlineKeyboardButton(
-                text="▶️ След", callback_data=f"admin:partners:page:{page + 1}"
-            ))
+            navigation.append(InlineKeyboardButton(text="▶️ След", callback_data=f"{prefix}:{page + 1}"))
         rows.append(navigation)
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:menu")])
+    if not revoked:
+        rows.append([InlineKeyboardButton(text="📦 Архив", callback_data="admin:partners:archived:0")])
+        rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:menu")])
+    else:
+        rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:partners:page:0")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def _edit_partners_page(callback: CallbackQuery, session_factory, page: int) -> None:
-    partners, users_by_id, total_pages, price = await _get_partners_page(session_factory, page)
+async def _edit_partners_page(
+    callback: CallbackQuery, session_factory, page: int, *, revoked: bool = False
+) -> None:
+    partners, users_by_id, total_pages, price = await _get_partners_page(
+        session_factory, page, revoked=revoked
+    )
     actual_page = max(0, min(page, total_pages - 1)) if total_pages else 0
     await callback.message.edit_text(
-        _partners_menu_text(actual_page, total_pages, price),
-        reply_markup=_partners_page_keyboard(partners, users_by_id, actual_page, total_pages, price),
+        _partners_menu_text(actual_page, total_pages, price, revoked=revoked),
+        reply_markup=_partners_page_keyboard(
+            partners, users_by_id, actual_page, total_pages, price, revoked=revoked
+        ),
     )
 
 
@@ -1697,6 +1707,13 @@ async def partners_menu(callback: CallbackQuery, session_factory) -> None:
 @admin_router.callback_query(F.data.regexp(r"^admin:partners:page:\d+$"))
 async def partners_page(callback: CallbackQuery, session_factory) -> None:
     await _edit_partners_page(callback, session_factory, int(callback.data.rsplit(":", 1)[1]))
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.regexp(r"^admin:partners:archived:\d+$"))
+async def archived_partners_page(callback: CallbackQuery, session_factory) -> None:
+    page = int(callback.data.rsplit(":", 1)[1])
+    await _edit_partners_page(callback, session_factory, page, revoked=True)
     await callback.answer()
 
 
@@ -1851,8 +1868,13 @@ def _partner_card_text(partner: ReferralPartner, user: User | None, started: int
 def _partner_card_keyboard(
     partner: ReferralPartner, *, viewer_can_manage_payouts: bool
 ) -> InlineKeyboardMarkup:
+    revoked = partner.revoked_at is not None
     rows = []
-    if partner.revoked_at is None:
+    if revoked:
+        rows.append([InlineKeyboardButton(
+            text="♻️ Восстановить", callback_data=f"admin:partner:{partner.telegram_id}:unrevoke"
+        )])
+    else:
         rows.append([InlineKeyboardButton(
             text="🚫 Отозвать", callback_data=f"admin:partner:{partner.telegram_id}:revoke"
         )])
@@ -1867,7 +1889,10 @@ def _partner_card_keyboard(
                 callback_data=f"admin:partner:{partner.telegram_id}:balance:add",
             )],
         ])
-    rows.append([InlineKeyboardButton(text="⬅️ К списку", callback_data="admin:partners:page:0")])
+    rows.append([InlineKeyboardButton(
+        text="⬅️ К списку",
+        callback_data="admin:partners:archived:0" if revoked else "admin:partners:page:0",
+    )])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -1925,7 +1950,7 @@ async def request_partner_revoke(callback: CallbackQuery) -> None:
         InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"admin:partner:{telegram_id}:revoke:confirm"),
         InlineKeyboardButton(text="❌ Отмена", callback_data=f"admin:partner:{telegram_id}:revoke:abort"),
     ]])
-    await callback.message.answer("Отозвать рефовода? Это действие можно отменить повторным добавлением.", reply_markup=keyboard)
+    await callback.message.answer("Отозвать рефовода? Его можно будет восстановить из архива.", reply_markup=keyboard)
     await callback.answer()
 
 
@@ -1949,6 +1974,21 @@ async def abort_partner_revoke(callback: CallbackQuery, session_factory) -> None
     telegram_id = _partner_id_from_callback(callback.data, ":revoke:abort")
     if telegram_id is None:
         await callback.answer("Некорректный идентификатор рефовода.", show_alert=True)
+        return
+    if await _edit_partner_card(callback, session_factory, telegram_id):
+        await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("admin:partner:") & F.data.endswith(":unrevoke"))
+async def unrevoke_partner_handler(callback: CallbackQuery, session_factory) -> None:
+    telegram_id = _partner_id_from_callback(callback.data, ":unrevoke")
+    if telegram_id is None:
+        await callback.answer("Некорректный идентификатор рефовода.", show_alert=True)
+        return
+    async with session_factory() as session:
+        partner = await unrevoke_partner(session, telegram_id)
+    if partner is None:
+        await callback.answer("Рефовод не найден.", show_alert=True)
         return
     if await _edit_partner_card(callback, session_factory, telegram_id):
         await callback.answer()

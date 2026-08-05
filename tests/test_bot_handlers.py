@@ -37,6 +37,7 @@ from app.bot.routers.admin import (
     add_admin_start,
     admin_router,
     admins_menu,
+    archived_partners_page,
     cancel_admin_input,
     cancel_admin_input_command,
     cancel_broadcast,
@@ -47,6 +48,7 @@ from app.bot.routers.admin import (
     choose_sponsor_request_mode,
     confirm_partner_balance_zero,
     confirm_partner_revoke,
+    unrevoke_partner_handler,
     confirm_campaign_cancel,
     confirm_campaign_create,
     confirm_admin_revoke,
@@ -1271,6 +1273,41 @@ async def test_confirm_admin_revoke_disables_admin_and_handles_owner(session_fac
     owner_callback = _partner_callback("admin:admins:900:revoke:confirm", message)
     await confirm_admin_revoke(owner_callback, session_factory)
     owner_callback.answer.assert_awaited_once_with("Нельзя отозвать owner-а.", show_alert=True)
+
+
+@pytest.mark.asyncio
+async def test_revoked_partner_moves_to_archive_and_can_be_restored(session_factory):
+    await _create_partner(session_factory, telegram_id=100)
+
+    message = SimpleNamespace(answer=AsyncMock(), edit_text=AsyncMock())
+    await confirm_partner_revoke(_partner_callback("admin:partner:100:revoke:confirm", message), session_factory)
+
+    active, _, active_total, _ = await _get_partners_page(session_factory, 0)
+    archived, _, archived_total, _ = await _get_partners_page(session_factory, 0, revoked=True)
+    assert [p.telegram_id for p in active] == []
+    assert active_total == 0
+    assert [p.telegram_id for p in archived] == [100]
+    assert archived_total == 1
+
+    list_callback = _partner_callback("admin:partners:archived:0", message)
+    await archived_partners_page(list_callback, session_factory)
+    assert "Архив рефоводов" in message.edit_text.await_args.args[0]
+
+    await unrevoke_partner_handler(_partner_callback("admin:partner:100:unrevoke", message), session_factory)
+
+    active, _, active_total, _ = await _get_partners_page(session_factory, 0)
+    archived, _, archived_total, _ = await _get_partners_page(session_factory, 0, revoked=True)
+    assert [p.telegram_id for p in active] == [100]
+    assert active_total == 1
+    assert archived == []
+    assert archived_total == 0
+
+    card_text = message.edit_text.await_args.args[0]
+    card_keyboard = message.edit_text.await_args.kwargs["reply_markup"]
+    assert "отозван" not in card_text
+    button_texts = [button.text for row in card_keyboard.inline_keyboard for button in row]
+    assert "🚫 Отозвать" in button_texts
+    assert "♻️ Восстановить" not in button_texts
 
 
 def test_partner_card_balance_buttons_require_payout_permission():

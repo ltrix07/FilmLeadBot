@@ -143,6 +143,19 @@ async def revoke_partner(session: AsyncSession, telegram_id: int) -> ReferralPar
     return partner
 
 
+async def unrevoke_partner(session: AsyncSession, telegram_id: int) -> ReferralPartner | None:
+    """Restore a revoked partner's whitelist entry, if it exists."""
+    partner = await session.scalar(
+        select(ReferralPartner).where(ReferralPartner.telegram_id == telegram_id)
+    )
+    if partner is None:
+        return None
+    if partner.revoked_at is not None:
+        partner.revoked_at = None
+        await session.commit()
+    return partner
+
+
 def format_user_label(telegram_id: int, user: User | None) -> str:
     """Return the most useful available human-readable partner identifier."""
     if user is not None and user.username:
@@ -157,10 +170,19 @@ def format_partner_label(partner: ReferralPartner, user: User | None) -> str:
 
 
 async def list_partners(
-    session: AsyncSession, limit: int | None = None, offset: int = 0
+    session: AsyncSession, *, revoked: bool = False, limit: int | None = None, offset: int = 0
 ) -> list[ReferralPartner]:
-    """Return all referral partners, newest approvals first."""
-    statement = select(ReferralPartner).order_by(ReferralPartner.approved_at.desc()).offset(offset)
+    """List either active partners or revoked (archived) partners, newest approvals first."""
+    statement = (
+        select(ReferralPartner)
+        .where(
+            ReferralPartner.revoked_at.is_not(None)
+            if revoked
+            else ReferralPartner.revoked_at.is_(None)
+        )
+        .order_by(ReferralPartner.approved_at.desc())
+        .offset(offset)
+    )
     if limit is not None:
         statement = statement.limit(limit)
     return list(
@@ -168,7 +190,11 @@ async def list_partners(
     )
 
 
-async def count_partners(session: AsyncSession) -> int:
-    """Return the total number of referral partners."""
-    count = await session.scalar(select(func.count()).select_from(ReferralPartner))
-    return int(count or 0)
+async def count_partners(session: AsyncSession, *, revoked: bool = False) -> int:
+    """Return the number of active partners, or revoked (archived) partners."""
+    statement = select(func.count()).select_from(ReferralPartner).where(
+        ReferralPartner.revoked_at.is_not(None)
+        if revoked
+        else ReferralPartner.revoked_at.is_(None)
+    )
+    return int(await session.scalar(statement) or 0)
