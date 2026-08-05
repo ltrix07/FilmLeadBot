@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from decimal import Decimal, InvalidOperation
 from math import ceil
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from collections.abc import Coroutine
 
 from aiogram import Bot, F, Router
@@ -76,14 +76,17 @@ from app.services.partner_balance import (
 )
 from app.services.partners import (
     approve_partner,
+    clear_partner_bonus_rate,
     count_partners,
     format_partner_label,
     format_user_label,
     format_partner_stats_text,
     get_partner_stats,
+    is_bonus_active,
     list_partners,
     queue_pending_partner_grant,
     revoke_partner,
+    set_partner_bonus_rate,
     unrevoke_partner,
 )
 from app.services.settings import (
@@ -162,6 +165,11 @@ class ImportForm(StatesGroup):
 
 class PartnerForm(StatesGroup):
     waiting_user = State()
+
+
+class PartnerBonusForm(StatesGroup):
+    waiting_rate = State()
+    waiting_until = State()
 
 
 class PricingForm(StatesGroup):
@@ -1785,6 +1793,9 @@ def _partner_telegram_id_from_message(message: Message) -> int | None:
 
 
 async def _process_partner_user(telegram_id: int, message: Message, state: FSMContext, session_factory) -> None:
+    pending_grant = False
+    partner = None
+    is_new = False
     try:
         async with session_factory() as session:
             partner, is_new = await approve_partner(session, telegram_id, message.from_user.id)
@@ -1792,28 +1803,128 @@ async def _process_partner_user(telegram_id: int, message: Message, state: FSMCo
         if str(error) == "user_not_started":
             async with session_factory() as session:
                 await queue_pending_partner_grant(session, telegram_id, message.from_user.id)
-            await state.clear()
-            await message.answer(
-                "Этот пользователь ещё не запускал бота. Заявка сохранена — как только он "
-                "нажмёт /start, права рефовода будут выданы автоматически."
-            )
-            await _send_admin_menu(message)
-            return
-        raise
+            pending_grant = True
+        else:
+            raise
 
-    await state.clear()
-    if is_new:
+    await state.update_data(
+        partner_telegram_id=telegram_id,
+        pending_grant=pending_grant,
+        requested_by_admin_telegram_id=message.from_user.id,
+        is_new=is_new,
+        referral_code=partner.referral_code if partner is not None else None,
+        bonus_return="partners",
+    )
+    await state.set_state(None)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Да", callback_data="admin:partner:bonus:yes"),
+        InlineKeyboardButton(text="❌ Нет", callback_data="admin:partner:bonus:no"),
+    ]])
+    await message.answer("Установить бонусную ставку для этого рефовода?", reply_markup=keyboard)
+
+
+async def _finish_partner_add(message: Message, state: FSMContext, session_factory) -> None:
+    data = await state.get_data()
+    telegram_id = int(data["partner_telegram_id"])
+    if data.get("pending_grant"):
         await message.answer(
-            f"Рефовод #{telegram_id} добавлен. Код: `{partner.referral_code}`. "
+            "Этот пользователь ещё не запускал бота. Заявка сохранена — как только он "
+            "нажмёт /start, права рефовода будут выданы автоматически."
+        )
+    elif data.get("is_new"):
+        await message.answer(
+            f"Рефовод #{telegram_id} добавлен. Код: `{data['referral_code']}`. "
             "Он должен написать боту слово «партнер», чтобы активировать кабинет."
         )
     else:
-        await message.answer(f"Пользователь #{telegram_id} уже рефовод (код: `{partner.referral_code}`).")
+        await message.answer(f"Пользователь #{telegram_id} уже рефовод (код: `{data['referral_code']}`).")
+    await state.clear()
     partners, users_by_id, total_pages, price = await _get_partners_page(session_factory, 0)
     await message.answer(
         _partners_menu_text(0, total_pages, price),
         reply_markup=_partners_page_keyboard(partners, users_by_id, 0, total_pages, price),
     )
+
+
+@admin_router.callback_query(F.data == "admin:partner:bonus:no")
+async def skip_partner_bonus(callback: CallbackQuery, state: FSMContext, session_factory) -> None:
+    await _finish_partner_add(callback.message, state, session_factory)
+    await callback.answer()
+
+
+async def _start_partner_bonus(callback: CallbackQuery, state: FSMContext, *, card: bool) -> None:
+    if card:
+        telegram_id = _partner_id_from_callback(callback.data, ":bonus")
+        if telegram_id is None:
+            await callback.answer("Некорректный идентификатор рефовода.", show_alert=True)
+            return
+        await state.update_data(
+            partner_telegram_id=telegram_id, pending_grant=False, bonus_return="card"
+        )
+    await state.set_state(PartnerBonusForm.waiting_rate)
+    await callback.message.answer(
+        "Пришли бонусную ставку в рублях, например: 500 или 500.50.",
+        reply_markup=_with_cancel(),
+    )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data == "admin:partner:bonus:yes")
+async def accept_partner_bonus(callback: CallbackQuery, state: FSMContext) -> None:
+    await _start_partner_bonus(callback, state, card=False)
+
+
+@admin_router.message(StateFilter(PartnerBonusForm.waiting_rate))
+async def receive_partner_bonus_rate(message: Message, state: FSMContext) -> None:
+    if _is_cancel_text(message):
+        await _cancel_admin_input_message(message, state)
+        return
+    try:
+        rate = Decimal((message.text or "").strip().replace(",", "."))
+    except (InvalidOperation, ValueError):
+        rate = Decimal("0")
+    if not rate.is_finite() or rate <= 0:
+        await message.answer(
+            "Пришли положительную бонусную ставку в рублях, например: 500 или 500.50.",
+            reply_markup=_with_cancel(),
+        )
+        return
+    await state.update_data(bonus_rate=str(rate))
+    await state.set_state(PartnerBonusForm.waiting_until)
+    await message.answer("До какого числа действует ставка? Формат: ДД.ММ (например 31.08).", reply_markup=_with_cancel())
+
+
+@admin_router.message(StateFilter(PartnerBonusForm.waiting_until))
+async def receive_partner_bonus_until(message: Message, state: FSMContext, session_factory) -> None:
+    if _is_cancel_text(message):
+        await _cancel_admin_input_message(message, state)
+        return
+    try:
+        parsed = datetime.strptime((message.text or "").strip(), "%d.%m")
+        today = datetime.now(timezone.utc).date()
+        until = date(today.year, parsed.month, parsed.day)
+        if until < today:
+            until = date(today.year + 1, parsed.month, parsed.day)
+    except ValueError:
+        await message.answer("Не понял дату. Пришли её в формате ДД.ММ, например 31.08.", reply_markup=_with_cancel())
+        return
+    data = await state.get_data()
+    rate = Decimal(data["bonus_rate"])
+    telegram_id = int(data["partner_telegram_id"])
+    async with session_factory() as session:
+        if data.get("pending_grant"):
+            await queue_pending_partner_grant(
+                session, telegram_id, int(data["requested_by_admin_telegram_id"]),
+                bonus_rate=rate, bonus_rate_until=until,
+            )
+        else:
+            await set_partner_bonus_rate(session, telegram_id, rate, until)
+    await message.answer(f"Бонусная ставка {rate:.2f} ₽ установлена до {until:%d.%m.%Y}.", reply_markup=ReplyKeyboardRemove())
+    if data.get("bonus_return") == "card":
+        await state.clear()
+        await _send_partner_card(message, session_factory, telegram_id)
+    else:
+        await _finish_partner_add(message, state, session_factory)
 
 
 @admin_router.message(StateFilter(PartnerForm.waiting_user), F.users_shared)
@@ -1856,12 +1967,15 @@ async def _get_partner_card_data(session_factory, telegram_id: int):
 
 def _partner_card_text(partner: ReferralPartner, user: User | None, started: int, confirmed: int, balance: Decimal) -> str:
     emoji, status = _partner_status(partner)
+    bonus_text = ""
+    if is_bonus_active(partner):
+        bonus_text = f"\nБонусная ставка: {partner.bonus_rate:.2f} ₽ до {partner.bonus_rate_until:%d.%m.%Y}"
     return (
         f"{emoji} {format_partner_label(partner, user)}\n"
         f"Статус: {status}\n"
         f"Код: {partner.referral_code}\n\n"
         f"{format_partner_stats_text(started, confirmed)}\n"
-        f"Баланс: {balance:.2f} ₽"
+        f"Баланс: {balance:.2f} ₽{bonus_text}"
     )
 
 
@@ -1889,6 +2003,16 @@ def _partner_card_keyboard(
                 callback_data=f"admin:partner:{partner.telegram_id}:balance:add",
             )],
         ])
+    bonus_buttons = [InlineKeyboardButton(
+        text="🎁 Изменить бонусную ставку" if is_bonus_active(partner) else "🎁 Бонусная ставка",
+        callback_data=f"admin:partner:{partner.telegram_id}:bonus",
+    )]
+    if is_bonus_active(partner):
+        bonus_buttons.append(InlineKeyboardButton(
+            text="❌ Отменить бонус",
+            callback_data=f"admin:partner:{partner.telegram_id}:bonus:clear",
+        ))
+    rows.append(bonus_buttons)
     rows.append([InlineKeyboardButton(
         text="⬅️ К списку",
         callback_data="admin:partners:archived:0" if revoked else "admin:partners:page:0",
@@ -1938,6 +2062,28 @@ async def show_partner_card(callback: CallbackQuery, session_factory) -> None:
         return
     if await _edit_partner_card(callback, session_factory, telegram_id):
         await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("admin:partner:") & F.data.endswith(":bonus"))
+async def request_partner_bonus(callback: CallbackQuery, state: FSMContext) -> None:
+    await _start_partner_bonus(callback, state, card=True)
+
+
+@admin_router.callback_query(
+    F.data.startswith("admin:partner:") & F.data.endswith(":bonus:clear")
+)
+async def clear_partner_bonus_handler(callback: CallbackQuery, session_factory) -> None:
+    telegram_id = _partner_id_from_callback(callback.data, ":bonus:clear")
+    if telegram_id is None:
+        await callback.answer("Некорректный идентификатор рефовода.", show_alert=True)
+        return
+    async with session_factory() as session:
+        partner = await clear_partner_bonus_rate(session, telegram_id)
+    if partner is None:
+        await callback.answer("Рефовод не найден.", show_alert=True)
+        return
+    await _edit_partner_card(callback, session_factory, telegram_id)
+    await callback.answer()
 
 
 @admin_router.callback_query(F.data.startswith("admin:partner:") & F.data.endswith(":revoke"))

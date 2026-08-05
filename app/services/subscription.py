@@ -21,8 +21,7 @@ from app.db.models import (
     Sponsor,
     SponsorJoinRequest,
 )
-from app.services.partners import is_active_partner
-from app.services.settings import get_subscription_price
+from app.services.partners import get_effective_referral_price, is_active_partner
 
 logger = logging.getLogger(__name__)
 
@@ -201,7 +200,6 @@ async def _record_campaign_completions(
             ReferralEvent.referred_user_telegram_id == telegram_id
         )
     )
-    subscription_price = await get_subscription_price(session)
     for campaign_id in campaign_ids:
         inserted = await session.execute(
             insert(CampaignCompletion)
@@ -236,13 +234,14 @@ async def _record_campaign_completions(
             continue
 
         if referrer_telegram_id is not None:
+            price = await get_effective_referral_price(session, referrer_telegram_id)
             await session.execute(
                 insert(ReferralSubscription)
                 .values(
                     campaign_id=campaign_id,
                     referrer_telegram_id=referrer_telegram_id,
                     referred_user_telegram_id=telegram_id,
-                    price_at_credit=subscription_price,
+                    price_at_credit=price,
                 )
                 .on_conflict_do_nothing(
                     index_elements=("campaign_id", "referred_user_telegram_id")

@@ -1,6 +1,7 @@
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, func
+from sqlalchemy import BigInteger, Date, DateTime, ForeignKey, Numeric, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -14,3 +15,5 @@ class PendingPartnerGrant(Base):
         BigInteger, ForeignKey("admins.telegram_id")
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    bonus_rate: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    bonus_rate_until: Mapped[date | None] = mapped_column(Date)

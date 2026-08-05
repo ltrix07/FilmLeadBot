@@ -1,6 +1,7 @@
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, String, func
+from sqlalchemy import BigInteger, Date, DateTime, ForeignKey, Numeric, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -16,3 +17,5 @@ class ReferralPartner(Base):
     approved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    bonus_rate: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    bonus_rate_until: Mapped[date | None] = mapped_column(Date)

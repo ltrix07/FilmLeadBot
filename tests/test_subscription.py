@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
@@ -109,6 +109,7 @@ async def test_referral_credit_is_recorded_once_per_campaign(session_factory):
     async with session_factory() as session:
         assert await get_partner_stats(session, 100) == (1, 1)
 
+
     async with session_factory() as session:
         sponsor = Sponsor(chat_id=-100_001, title="Sponsor B", type=SponsorType.CHANNEL)
         campaign_b = Campaign(
@@ -137,6 +138,33 @@ async def test_referral_credit_is_recorded_once_per_campaign(session_factory):
     ]
     async with session_factory() as session:
         assert await get_partner_stats(session, 100) == (1, 2)
+
+
+@pytest.mark.asyncio
+async def test_referral_credit_freezes_active_bonus_or_default_price(session_factory):
+    campaigns = await add_campaigns(session_factory, count=2)
+    async with session_factory() as session:
+        admin = Admin(telegram_id=900)
+        session.add_all([admin, User(telegram_id=100), User(telegram_id=2), User(telegram_id=3)])
+        await session.flush()
+        session.add(ReferralPartner(
+            telegram_id=100, referral_code="bonus-partner", approved_by_admin_id=admin.id,
+            bonus_rate=Decimal("25.00"),
+            bonus_rate_until=datetime.now(timezone.utc).date(),
+        ))
+        session.add_all([
+            ReferralEvent(referred_user_telegram_id=2, referrer_telegram_id=100),
+            ReferralEvent(referred_user_telegram_id=3, referrer_telegram_id=100),
+        ])
+        await set_subscription_price(session, Decimal("10.00"))
+        await session.commit()
+        await _record_campaign_completions(session, [campaigns[0].id], 2)
+        partner = await session.scalar(select(ReferralPartner).where(ReferralPartner.telegram_id == 100))
+        partner.bonus_rate_until = datetime.now(timezone.utc).date() - timedelta(days=1)
+        await session.commit()
+        await _record_campaign_completions(session, [campaigns[1].id], 3)
+        credits = list(await session.scalars(select(ReferralSubscription).order_by(ReferralSubscription.campaign_id)))
+    assert [credit.price_at_credit for credit in credits] == [Decimal("25.00"), Decimal("10.00")]
 
 
 @pytest.mark.asyncio

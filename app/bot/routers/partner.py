@@ -18,6 +18,7 @@ from app.services.partners import (
     get_partner_cabinet_text,
     get_partner_menu_keyboard,
     get_partner_stats,
+    get_active_partner_bonus,
     is_active_partner,
 )
 from app.services.partner_balance import get_partner_balance, get_partner_balance_history
@@ -159,8 +160,13 @@ async def partner_balance(callback: CallbackQuery, session_factory) -> None:
             return
         balance = await get_partner_balance(session, callback.from_user.id)
         history = await get_partner_balance_history(session, callback.from_user.id)
+        bonus = await get_active_partner_bonus(session, callback.from_user.id)
+    bonus_text = ""
+    if bonus is not None:
+        rate, until = bonus
+        bonus_text = f"🎁 Бонусная ставка: {rate:.2f} ₽ до {until:%d.%m.%Y}\n\n"
     await callback.message.edit_text(
-        f"Ваш текущий баланс: {balance:.2f} ₽\n\n"
+        bonus_text + f"Ваш текущий баланс: {balance:.2f} ₽\n\n"
         "Для вывода напишите: @Anatoliy_Here\n\n"
         "История за последние 30 дней:\n" + "\n".join(history),
         reply_markup=_partner_back_keyboard(),

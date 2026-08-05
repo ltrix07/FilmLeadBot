@@ -1,4 +1,5 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import func, select
@@ -19,12 +20,17 @@ from app.db.models import (
 )
 from app.services.partners import (
     approve_partner,
+    clear_partner_bonus_rate,
     format_partner_label,
     format_partner_self_stats_text,
     get_partner_stats,
     get_partner_menu_keyboard,
+    get_active_partner_bonus,
+    get_effective_referral_price,
     revoke_partner,
+    set_partner_bonus_rate,
 )
+from app.services.settings import set_subscription_price
 
 
 async def _admin_and_user(session_factory, user_id: int = 100, admin_id: int = 800) -> None:
@@ -77,6 +83,39 @@ async def test_revoke_partner_marks_existing_and_ignores_missing(session_factory
         assert partner is not None
         assert partner.revoked_at is not None
         assert await revoke_partner(session, 999) is None
+
+
+@pytest.mark.asyncio
+async def test_effective_referral_price_uses_only_active_partner_bonus(session_factory):
+    await _admin_and_user(session_factory)
+    today = datetime.now(timezone.utc).date()
+    async with session_factory() as session:
+        await approve_partner(session, 100, 800)
+        await set_subscription_price(session, Decimal("10.00"))
+        await set_partner_bonus_rate(session, 100, Decimal("25.50"), today)
+        assert await get_effective_referral_price(session, 100) == Decimal("25.50")
+        assert await get_active_partner_bonus(session, 100) == (Decimal("25.50"), today)
+
+        partner = await session.scalar(select(ReferralPartner).where(ReferralPartner.telegram_id == 100))
+        partner.bonus_rate_until = today - timedelta(days=1)
+        await session.commit()
+        assert await get_effective_referral_price(session, 100) == Decimal("10.00")
+        assert await get_active_partner_bonus(session, 100) is None
+        assert await get_effective_referral_price(session, 999) == Decimal("10.00")
+
+
+@pytest.mark.asyncio
+async def test_clear_partner_bonus_rate_clears_existing_and_ignores_missing(session_factory):
+    await _admin_and_user(session_factory)
+    today = datetime.now(timezone.utc).date()
+    async with session_factory() as session:
+        await approve_partner(session, 100, 800)
+        await set_partner_bonus_rate(session, 100, Decimal("25.50"), today)
+        partner = await clear_partner_bonus_rate(session, 100)
+        assert partner is not None
+        assert partner.bonus_rate is None
+        assert partner.bonus_rate_until is None
+        assert await clear_partner_bonus_rate(session, 999) is None
 
 
 @pytest.mark.asyncio

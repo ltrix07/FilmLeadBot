@@ -25,7 +25,9 @@ from app.services.notifications import (
     notify_admins,
 )
 from app.services.admins import add_admin
-from app.services.partners import approve_partner, get_partner_cabinet_text, get_partner_menu_keyboard
+from app.services.partners import (
+    approve_partner, get_partner_cabinet_text, get_partner_menu_keyboard, set_partner_bonus_rate,
+)
 from app.services.subscription import SubscriptionAccessService
 from app.services.settings import get_welcome_message
 
@@ -38,6 +40,10 @@ async def _apply_pending_grants(session: AsyncSession, telegram_id: int, bot: Bo
     if partner_grant is not None:
         requester = partner_grant.requested_by_admin_telegram_id
         await approve_partner(session, telegram_id, requester)
+        if partner_grant.bonus_rate is not None and partner_grant.bonus_rate_until is not None:
+            await set_partner_bonus_rate(
+                session, telegram_id, partner_grant.bonus_rate, partner_grant.bonus_rate_until
+            )
         await session.delete(partner_grant)
         await session.commit()
         await notify_admin(

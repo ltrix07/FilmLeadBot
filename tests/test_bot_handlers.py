@@ -45,6 +45,7 @@ from app.bot.routers.admin import (
     cancel_campaign_limit_decrease,
     cancel_code_title_edit,
     cancel_codes_import,
+    clear_partner_bonus_handler,
     choose_sponsor_request_mode,
     confirm_partner_balance_zero,
     confirm_partner_revoke,
@@ -1319,6 +1320,65 @@ def test_partner_card_balance_buttons_require_payout_permission():
     assert "💵 Обнулить баланс (Вывод)" not in denied_text
     assert "➕ Добавить средства" not in denied_text
     assert {"💵 Обнулить баланс (Вывод)", "➕ Добавить средства"} <= set(allowed_text)
+
+
+def test_partner_card_bonus_clear_button_is_shown_only_for_active_bonus():
+    today = datetime.now(timezone.utc).date()
+    active_partner = ReferralPartner(
+        telegram_id=100,
+        referral_code="partner",
+        approved_by_admin_id=1,
+        bonus_rate=Decimal("25.50"),
+        bonus_rate_until=today,
+    )
+    inactive_partner = ReferralPartner(
+        telegram_id=101,
+        referral_code="partner-inactive",
+        approved_by_admin_id=1,
+    )
+
+    active_buttons = [
+        button for row in _partner_card_keyboard(
+            active_partner, viewer_can_manage_payouts=False
+        ).inline_keyboard for button in row
+    ]
+    inactive_buttons = [
+        button for row in _partner_card_keyboard(
+            inactive_partner, viewer_can_manage_payouts=False
+        ).inline_keyboard for button in row
+    ]
+
+    assert any(
+        button.text == "❌ Отменить бонус"
+        and button.callback_data == "admin:partner:100:bonus:clear"
+        for button in active_buttons
+    )
+    assert all(button.text != "❌ Отменить бонус" for button in inactive_buttons)
+
+
+@pytest.mark.asyncio
+async def test_clear_partner_bonus_handler_clears_bonus_and_rerenders_card(session_factory):
+    await _create_partner(session_factory)
+    async with session_factory() as session:
+        partner = await session.scalar(
+            select(ReferralPartner).where(ReferralPartner.telegram_id == 100)
+        )
+        partner.bonus_rate = Decimal("25.50")
+        partner.bonus_rate_until = datetime.now(timezone.utc).date()
+        await session.commit()
+    message = SimpleNamespace(answer=AsyncMock(), edit_text=AsyncMock())
+    callback = _partner_callback("admin:partner:100:bonus:clear", message)
+
+    await clear_partner_bonus_handler(callback, session_factory)
+
+    async with session_factory() as session:
+        partner = await session.scalar(
+            select(ReferralPartner).where(ReferralPartner.telegram_id == 100)
+        )
+        assert partner.bonus_rate is None
+        assert partner.bonus_rate_until is None
+    assert "Бонусная ставка:" not in message.edit_text.await_args.args[0]
+    callback.answer.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio

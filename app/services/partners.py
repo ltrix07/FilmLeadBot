@@ -1,4 +1,5 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from decimal import Decimal
 import secrets
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -11,21 +12,27 @@ from app.db.models import (
     ReferralSubscription, Sponsor, User,
 )
 from app.services.admins import get_admin_id
+from app.services.settings import get_subscription_price
 
 
 async def queue_pending_partner_grant(
-    session: AsyncSession, telegram_id: int, requested_by_admin_telegram_id: int
+    session: AsyncSession, telegram_id: int, requested_by_admin_telegram_id: int,
+    *, bonus_rate: Decimal | None = None, bonus_rate_until: date | None = None,
 ) -> PendingPartnerGrant:
     """Create or refresh a partner grant to apply when the user starts the bot."""
     statement = insert(PendingPartnerGrant).values(
         telegram_id=telegram_id,
         requested_by_admin_telegram_id=requested_by_admin_telegram_id,
+        bonus_rate=bonus_rate,
+        bonus_rate_until=bonus_rate_until,
     )
     statement = statement.on_conflict_do_update(
         index_elements=[PendingPartnerGrant.telegram_id],
         set_={
             "requested_by_admin_telegram_id": statement.excluded.requested_by_admin_telegram_id,
             "created_at": func.now(),
+            "bonus_rate": statement.excluded.bonus_rate,
+            "bonus_rate_until": statement.excluded.bonus_rate_until,
         },
     )
     await session.execute(statement)
@@ -33,6 +40,57 @@ async def queue_pending_partner_grant(
     grant = await session.get(PendingPartnerGrant, telegram_id)
     assert grant is not None
     return grant
+
+
+def is_bonus_active(partner: ReferralPartner) -> bool:
+    return (
+        partner.bonus_rate is not None
+        and partner.bonus_rate_until is not None
+        and partner.bonus_rate_until >= datetime.now(timezone.utc).date()
+    )
+
+
+async def set_partner_bonus_rate(
+    session: AsyncSession, telegram_id: int, rate: Decimal, until: date
+) -> ReferralPartner | None:
+    partner = await session.scalar(
+        select(ReferralPartner).where(ReferralPartner.telegram_id == telegram_id)
+    )
+    if partner is None:
+        return None
+    partner.bonus_rate = rate
+    partner.bonus_rate_until = until
+    await session.commit()
+    return partner
+
+
+async def clear_partner_bonus_rate(session: AsyncSession, telegram_id: int) -> ReferralPartner | None:
+    partner = await session.scalar(
+        select(ReferralPartner).where(ReferralPartner.telegram_id == telegram_id)
+    )
+    if partner is None:
+        return None
+    partner.bonus_rate = None
+    partner.bonus_rate_until = None
+    await session.commit()
+    return partner
+
+
+async def get_active_partner_bonus(
+    session: AsyncSession, telegram_id: int
+) -> tuple[Decimal, date] | None:
+    partner = await session.scalar(
+        select(ReferralPartner).where(ReferralPartner.telegram_id == telegram_id)
+    )
+    if partner is None or not is_bonus_active(partner):
+        return None
+    assert partner.bonus_rate is not None and partner.bonus_rate_until is not None
+    return partner.bonus_rate, partner.bonus_rate_until
+
+
+async def get_effective_referral_price(session: AsyncSession, referrer_telegram_id: int) -> Decimal:
+    bonus = await get_active_partner_bonus(session, referrer_telegram_id)
+    return bonus[0] if bonus else await get_subscription_price(session)
 
 
 def get_partner_cabinet_text() -> str:

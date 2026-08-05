@@ -237,10 +237,8 @@ async def test_process_partner_user_approves_selected_user(session_factory):
     await _process_partner_user(100, message, state, session_factory)
 
     assert state.current_state is None
-    assert any("Рефовод #100 добавлен" in text for text, _ in message.answers)
-    partners_menu = next(kwargs["reply_markup"] for text, kwargs in message.answers if "Рефоводы" in text)
-    assert partners_menu.inline_keyboard
-    assert not any(text == "Админ-панель:" for text, _ in message.answers)
+    assert state.data["partner_telegram_id"] == 100
+    assert any("Установить бонусную ставку" in text for text, _ in message.answers)
 
 
 @pytest.mark.asyncio
@@ -258,11 +256,8 @@ async def test_process_partner_user_queues_grant_for_user_who_never_started(sess
         grant = await session.get(PendingPartnerGrant, 100)
     assert grant.requested_by_admin_telegram_id == 800
     assert await state.get_state() is None
-    assert any("Заявка сохранена" in text for text, _ in message.answers)
-    assert any(
-        text == "Админ-панель:" and kwargs["reply_markup"] == _admin_menu_keyboard()
-        for text, kwargs in message.answers
-    )
+    assert state.data["pending_grant"] is True
+    assert any("Установить бонусную ставку" in text for text, _ in message.answers)
 
 
 @pytest.mark.asyncio

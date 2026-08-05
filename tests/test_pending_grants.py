@@ -1,9 +1,11 @@
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import func, select
 
-from app.bot.routers.start import _ensure_user_and_referral
+from app.bot.routers.start import _apply_pending_grants, _ensure_user_and_referral
 from app.db.models import Admin, PendingAdminGrant, PendingPartnerGrant, ReferralPartner
 from app.services.admins import queue_pending_admin_grant
 from app.services.partners import queue_pending_partner_grant
@@ -63,6 +65,22 @@ async def test_first_start_applies_pending_partner_grant_and_notifies_requester(
         bot.send_message.assert_awaited_once_with(
             800, "Рефовод #100 запустил бота — права выданы автоматически."
         )
+
+
+@pytest.mark.asyncio
+async def test_pending_partner_bonus_is_applied_on_first_start(session_factory):
+    until = datetime.now(timezone.utc).date() + timedelta(days=7)
+    async with session_factory() as session:
+        session.add(Admin(telegram_id=800))
+        await session.commit()
+        await queue_pending_partner_grant(
+            session, 100, 800, bonus_rate=Decimal("33.33"), bonus_rate_until=until
+        )
+        await _ensure_user_and_referral(session, 100, None)
+        await _apply_pending_grants(session, 100, AsyncMock())
+        partner = await session.scalar(select(ReferralPartner).where(ReferralPartner.telegram_id == 100))
+        assert partner is not None
+        assert (partner.bonus_rate, partner.bonus_rate_until) == (Decimal("33.33"), until)
 
 
 @pytest.mark.asyncio
