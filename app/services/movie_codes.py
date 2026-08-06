@@ -31,24 +31,6 @@ async def build_active_codes_export_xlsx(session: AsyncSession) -> bytes:
     return output.getvalue()
 
 
-async def build_all_codes_export_xlsx(session: AsyncSession) -> bytes:
-    """Export every movie code (active and inactive) for admin review."""
-    movie_codes = list((await session.scalars(select(MovieCode).order_by(MovieCode.code))).all())
-    workbook = Workbook()
-    worksheet = workbook.active
-    worksheet.append(["code", "title", "status"])
-    for cell in worksheet[1]:
-        cell.font = Font(bold=True)
-    for movie_code in movie_codes:
-        worksheet.append([movie_code.code, movie_code.title, movie_code.status.value])
-    for cell in worksheet["A"]:
-        cell.number_format = "@"
-    output = io.BytesIO()
-    workbook.save(output)
-    workbook.close()
-    return output.getvalue()
-
-
 async def create_code(
     session: AsyncSession, code: str, title: str, admin_telegram_id: int, *, source: str = "manual"
 ) -> MovieCode:

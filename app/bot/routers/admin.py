@@ -62,7 +62,7 @@ from app.services.broadcasts import (
 )
 from app.services.campaign_jobs import attempt_resume_campaign
 from app.services.movie_codes import (
-    build_all_codes_export_xlsx,
+    build_active_codes_export_xlsx,
     create_code,
     deactivate_code,
     get_code_history,
@@ -2369,7 +2369,7 @@ async def send_import_template(callback: CallbackQuery) -> None:
 @admin_router.callback_query(F.data == "admin:code:export")
 async def send_codes_export(callback: CallbackQuery, session_factory) -> None:
     async with session_factory() as session:
-        content = await build_all_codes_export_xlsx(session)
+        content = await build_active_codes_export_xlsx(session)
     await callback.message.answer_document(
         BufferedInputFile(content, filename="codes_export.xlsx")
     )
